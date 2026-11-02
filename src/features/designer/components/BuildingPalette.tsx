@@ -6,15 +6,21 @@ import { ANNO_1404_PRESETS, CATEGORY_DEFINITIONS } from "../presetsData";
 import type { AnnoRegion, BuildingCategory, BuildingPreset } from "../types";
 
 export type BuildingPaletteProps = {
-	readonly onStartPaletteDrag: (presetId: string) => void;
+	readonly isMobileDrawer?: boolean;
+	readonly onCloseDrawer?: () => void;
 	readonly onEndPaletteDrag: () => void;
+	readonly onPresetPicked?: () => void;
+	readonly onStartPaletteDrag: (presetId: string) => void;
 };
 
 type RegionFilter = "all" | AnnoRegion;
 
 export const BuildingPalette = ({
-	onStartPaletteDrag,
+	isMobileDrawer = false,
+	onCloseDrawer,
 	onEndPaletteDrag,
+	onPresetPicked,
+	onStartPaletteDrag,
 }: BuildingPaletteProps): FunctionComponent => {
 	const searchInputId = useId();
 	const [query, setQuery] = useState<string>("");
@@ -89,22 +95,31 @@ export const BuildingPalette = ({
 		[groupedPresets]
 	);
 
-	return (
-		<aside
-			aria-label="Anno 1404 Building Presets"
-			className="flex min-h-0 flex-col border-r border-amber-500/20 bg-stone-950 text-stone-100"
-		>
+	const content = (
+		<>
 			<search className="flex flex-col gap-2.5 border-b border-stone-800 p-3">
-				<div className="flex items-center justify-between">
+				<div className="flex items-center justify-between gap-2">
 					<h2 className="text-xs font-semibold tracking-wider text-amber-400/90 uppercase">
 						Anno 1404 Palette
 					</h2>
-					<span className="font-mono text-[11px] text-stone-400">
-						{totalVisibleCount} presets
-					</span>
+					<div className="flex items-center gap-2">
+						<span className="font-mono text-[11px] text-stone-400">
+							{totalVisibleCount} presets
+						</span>
+						{isMobileDrawer && onCloseDrawer && (
+							<button
+								aria-label="Close building palette"
+								className="anno-touch-target inline-flex items-center justify-center rounded-md p-1 text-stone-400 hover:bg-stone-800 hover:text-stone-100"
+								type="button"
+								onClick={onCloseDrawer}
+							>
+								<XMarkIcon aria-hidden="true" className="h-5 w-5" />
+							</button>
+						)}
+					</div>
 				</div>
 
-				{/* Search input */}
+				{/* Search input (16px on mobile prevents iOS Safari auto-zoom) */}
 				<div className="relative flex items-center">
 					<label className="sr-only" htmlFor={searchInputId}>
 						Search Anno 1404 buildings
@@ -114,9 +129,9 @@ export const BuildingPalette = ({
 						className="pointer-events-none absolute left-2.5 h-4 w-4 text-stone-400"
 					/>
 					<input
-						className="w-full rounded-md border border-stone-700/80 bg-stone-900 py-1.5 pr-8 pl-8 text-xs text-stone-100 placeholder:text-stone-500 focus:border-amber-400 focus:outline-none"
+						className="w-full rounded-md border border-stone-700/80 bg-stone-900 py-1.5 pr-8 pl-8 text-base text-stone-100 placeholder:text-sm placeholder:text-stone-500 focus:border-amber-400 focus:outline-none lg:text-xs lg:placeholder:text-xs"
 						id={searchInputId}
-						placeholder="Search name, group, or size (e.g. 6x5)..."
+						placeholder="Search buildings or size (6x5)..."
 						type="search"
 						value={query}
 						onChange={(event): void => {
@@ -126,13 +141,13 @@ export const BuildingPalette = ({
 					{query && (
 						<button
 							aria-label="Clear search"
-							className="absolute right-2 rounded p-0.5 text-stone-400 hover:text-stone-200"
+							className="absolute right-1.5 rounded p-1 text-stone-400 hover:text-stone-200"
 							type="button"
 							onClick={(): void => {
 								setQuery("");
 							}}
 						>
-							<XMarkIcon aria-hidden="true" className="h-3.5 w-3.5" />
+							<XMarkIcon aria-hidden="true" className="h-4 w-4" />
 						</button>
 					)}
 				</div>
@@ -151,7 +166,7 @@ export const BuildingPalette = ({
 							<button
 								key={regionOption.id}
 								type="button"
-								className={`rounded py-1 font-medium transition ${
+								className={`rounded py-1.5 font-medium transition lg:py-1 ${
 									active
 										? "bg-amber-500/20 text-amber-300 ring-1 ring-amber-400/40"
 										: "text-stone-400 hover:text-stone-200"
@@ -167,14 +182,14 @@ export const BuildingPalette = ({
 				</div>
 
 				{/* Category Filter Pills */}
-				<div className="flex flex-wrap gap-1" style={{ flexWrap: "wrap" }}>
+				<div className="anno-pill-wrap gap-1">
 					{CATEGORY_DEFINITIONS.map((categoryItem) => {
 						const isSelected = activeCategory === categoryItem.id;
 						return (
 							<button
 								key={categoryItem.id}
 								type="button"
-								className={`rounded-full px-2 py-0.5 text-[11px] font-medium transition ${
+								className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition lg:px-2 lg:py-0.5 ${
 									isSelected
 										? "bg-amber-400 text-stone-950 shadow-xs"
 										: "bg-stone-900 text-stone-300 ring-1 ring-stone-800 hover:bg-stone-800 hover:text-stone-100"
@@ -207,7 +222,7 @@ export const BuildingPalette = ({
 								open
 								className="group rounded-lg border border-stone-800/90 bg-stone-900/50"
 							>
-								<summary className="flex cursor-pointer list-none items-center justify-between px-2.5 py-1.5 text-xs font-semibold text-stone-200 select-none hover:text-amber-300">
+								<summary className="flex cursor-pointer list-none items-center justify-between px-2.5 py-2 text-xs font-semibold text-stone-200 select-none hover:text-amber-300 lg:py-1.5">
 									<span className="flex items-center gap-1.5">
 										<span
 											aria-hidden="true"
@@ -229,20 +244,25 @@ export const BuildingPalette = ({
 										return (
 											<button
 												key={preset.identifier}
-												draggable
+												draggable={!isMobileDrawer}
 												type="button"
-												className={`flex min-w-0 cursor-grab items-center gap-2.5 rounded-md px-2 py-1.5 text-left transition active:cursor-grabbing ${
+												className={`flex min-w-0 items-center gap-2.5 rounded-md px-2 py-2 text-left transition lg:cursor-grab lg:py-1.5 lg:active:cursor-grabbing ${
 													isArmed
 														? "bg-amber-500/20 ring-1 ring-amber-400"
-														: "hover:bg-stone-800/80"
+														: "hover:bg-stone-800/80 active:bg-stone-800"
 												}`}
 												onClick={(): void => {
 													selectPreset(preset.identifier);
+													onPresetPicked?.();
 												}}
 												onDragEnd={(): void => {
 													onEndPaletteDrag();
 												}}
 												onDragStart={(event): void => {
+													if (isMobileDrawer) {
+														event.preventDefault();
+														return;
+													}
 													event.dataTransfer.setData(
 														"application/anno1404-preset",
 														preset.identifier
@@ -303,8 +323,27 @@ export const BuildingPalette = ({
 			</div>
 
 			<div className="border-t border-stone-800 bg-stone-950 px-3 py-2 text-[11px] text-stone-400">
-				Click a building then click grid, or drag &amp; drop onto canvas.
+				{isMobileDrawer
+					? "Tap a building to arm brush, then tap or drag on the grid."
+					: "Click a building then click grid, or drag & drop onto canvas."}
 			</div>
+		</>
+	);
+
+	if (isMobileDrawer) {
+		return (
+			<div className="flex h-full min-h-0 flex-col border-r border-amber-500/20 bg-stone-950 text-stone-100">
+				{content}
+			</div>
+		);
+	}
+
+	return (
+		<aside
+			aria-label="Anno 1404 Building Presets"
+			className="flex min-h-0 flex-col border-r border-amber-500/20 bg-stone-950 text-stone-100"
+		>
+			{content}
 		</aside>
 	);
 };

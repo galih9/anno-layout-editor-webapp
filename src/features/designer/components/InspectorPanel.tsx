@@ -4,6 +4,7 @@ import {
 	DocumentDuplicateIcon,
 	ExclamationTriangleIcon,
 	TrashIcon,
+	XMarkIcon,
 } from "@heroicons/react/24/outline";
 import { useId, useMemo } from "react";
 import type { FunctionComponent } from "../../../common/types";
@@ -25,7 +26,15 @@ import {
 	rgbaToHex,
 } from "../presetsData";
 
-export const InspectorPanel = (): FunctionComponent => {
+export type InspectorPanelProps = {
+	readonly isMobileDrawer?: boolean;
+	readonly onCloseDrawer?: () => void;
+};
+
+export const InspectorPanel = ({
+	isMobileDrawer = false,
+	onCloseDrawer,
+}: InspectorPanelProps): FunctionComponent => {
 	const customLabelId = useId();
 	const customColorId = useId();
 
@@ -267,11 +276,26 @@ export const InspectorPanel = (): FunctionComponent => {
 			? (PRESET_BY_ID.get(activePresetId) ?? null)
 			: null;
 
-	return (
-		<aside
-			aria-label="Coverage Inspector and Layout Statistics"
-			className="flex min-h-0 flex-col border-l border-amber-500/20 bg-stone-950 text-stone-100"
-		>
+	const content = (
+		<>
+			{isMobileDrawer && (
+				<div className="flex items-center justify-between border-b border-stone-800 px-3 py-2.5">
+					<h2 className="text-xs font-semibold tracking-wider text-amber-400/90 uppercase">
+						Inspector &amp; Stats
+					</h2>
+					{onCloseDrawer && (
+						<button
+							aria-label="Close inspector"
+							className="anno-touch-target inline-flex items-center justify-center rounded-md p-1 text-stone-400 hover:bg-stone-800 hover:text-stone-100"
+							type="button"
+							onClick={onCloseDrawer}
+						>
+							<XMarkIcon aria-hidden="true" className="h-5 w-5" />
+						</button>
+					)}
+				</div>
+			)}
+
 			<div
 				className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto overscroll-contain p-3"
 				style={{ scrollbarGutter: "stable" }}
@@ -304,9 +328,9 @@ export const InspectorPanel = (): FunctionComponent => {
 								)}
 							</div>
 							<div className="min-w-0 flex-1">
-								<h2 className="truncate text-sm font-semibold text-amber-300">
+								<h3 className="truncate text-sm font-semibold text-amber-300">
 									{singleSelectedPreset.name}
-								</h2>
+								</h3>
 								<p className="text-[11px] text-stone-400">
 									{singleSelectedPreset.groupLabel} • Tile (
 									{singleSelectedBuilding.x}, {singleSelectedBuilding.y})
@@ -350,7 +374,7 @@ export const InspectorPanel = (): FunctionComponent => {
 						{/* Action buttons */}
 						<div className="mt-3 grid grid-cols-3 gap-1.5">
 							<button
-								className="inline-flex items-center justify-center gap-1 rounded border border-stone-700 bg-stone-800 px-2 py-1 text-xs font-medium text-stone-200 hover:border-amber-400/50 hover:text-amber-300 disabled:opacity-40"
+								className="anno-touch-target inline-flex items-center justify-center gap-1 rounded border border-stone-700 bg-stone-800 px-2 py-1.5 text-xs font-medium text-stone-200 hover:border-amber-400/50 hover:text-amber-300 disabled:opacity-40 lg:py-1"
 								type="button"
 								disabled={
 									singleSelectedBuilding.width === singleSelectedBuilding.height
@@ -361,7 +385,7 @@ export const InspectorPanel = (): FunctionComponent => {
 								Rotate
 							</button>
 							<button
-								className="inline-flex items-center justify-center gap-1 rounded border border-stone-700 bg-stone-800 px-2 py-1 text-xs font-medium text-stone-200 hover:border-amber-400/50 hover:text-amber-300"
+								className="anno-touch-target inline-flex items-center justify-center gap-1 rounded border border-stone-700 bg-stone-800 px-2 py-1.5 text-xs font-medium text-stone-200 hover:border-amber-400/50 hover:text-amber-300 lg:py-1"
 								type="button"
 								onClick={duplicateSelectedBuildings}
 							>
@@ -372,7 +396,7 @@ export const InspectorPanel = (): FunctionComponent => {
 								Clone
 							</button>
 							<button
-								className="inline-flex items-center justify-center gap-1 rounded border border-red-900/60 bg-red-950/40 px-2 py-1 text-xs font-medium text-red-300 hover:bg-red-900/50"
+								className="anno-touch-target inline-flex items-center justify-center gap-1 rounded border border-red-900/60 bg-red-950/40 px-2 py-1.5 text-xs font-medium text-red-300 hover:bg-red-900/50 lg:py-1"
 								type="button"
 								onClick={(): void => {
 									removeBuildings([singleSelectedBuilding.id]);
@@ -393,7 +417,7 @@ export const InspectorPanel = (): FunctionComponent => {
 									Custom Label
 								</label>
 								<input
-									className="mt-0.5 w-full rounded border border-stone-700 bg-stone-950 px-2 py-1 text-xs text-stone-100 placeholder:text-stone-500 focus:border-amber-400 focus:outline-none"
+									className="mt-0.5 w-full rounded border border-stone-700 bg-stone-950 px-2 py-1 text-base text-stone-100 placeholder:text-stone-500 focus:border-amber-400 focus:outline-none lg:text-xs"
 									id={customLabelId}
 									placeholder={singleSelectedPreset.name}
 									type="text"
@@ -410,7 +434,7 @@ export const InspectorPanel = (): FunctionComponent => {
 									Tile color override
 								</label>
 								<input
-									className="h-7 w-8 cursor-pointer rounded border border-stone-700 bg-stone-950 p-0.5"
+									className="anno-touch-target h-8 w-9 cursor-pointer rounded border border-stone-700 bg-stone-950 p-0.5 lg:h-7 lg:w-8"
 									id={customColorId}
 									type="color"
 									value={
@@ -442,9 +466,9 @@ export const InspectorPanel = (): FunctionComponent => {
 						{/* Area Coverage Breakdown for Service / Radius Buildings */}
 						{selectedCoverageStats && (
 							<div className="mt-3 border-t border-stone-800 pt-2.5">
-								<h3 className="text-[11px] font-semibold tracking-wide text-stone-300 uppercase">
+								<h4 className="text-[11px] font-semibold tracking-wide text-stone-300 uppercase">
 									Influence Coverage
-								</h3>
+								</h4>
 								{selectedCoverageStats.totalResidences > 0 && (
 									<div className="mt-1.5">
 										<div className="flex justify-between text-xs">
@@ -493,10 +517,10 @@ export const InspectorPanel = (): FunctionComponent => {
 						{/* Residence Service Needs Checklist */}
 						{residenceServiceChecks && (
 							<div className="mt-3 border-t border-stone-800 pt-2.5">
-								<h3 className="text-[11px] font-semibold tracking-wide text-stone-300 uppercase">
+								<h4 className="text-[11px] font-semibold tracking-wide text-stone-300 uppercase">
 									Service Coverage Check
-								</h3>
-								<ul className="mt-1.5 grid grid-cols-1 gap-1">
+								</h4>
+								<ul className="mt-1.5 grid grid-cols-1 gap-1" role="list">
 									{residenceServiceChecks.map((check) => (
 										<li
 											key={check.id}
@@ -521,9 +545,9 @@ export const InspectorPanel = (): FunctionComponent => {
 						{/* Logistics Check for Farms & Factories */}
 						{logisticsChecks && (
 							<div className="mt-3 border-t border-stone-800 pt-2.5">
-								<h3 className="text-[11px] font-semibold tracking-wide text-stone-300 uppercase">
+								<h4 className="text-[11px] font-semibold tracking-wide text-stone-300 uppercase">
 									Logistics &amp; Irrigation
-								</h3>
+								</h4>
 								<div className="mt-1.5 flex flex-col gap-1 text-xs">
 									<div className="flex items-center justify-between rounded bg-stone-950/70 px-2 py-1">
 										<span className="text-stone-300">Markethouse Range</span>
@@ -559,15 +583,15 @@ export const InspectorPanel = (): FunctionComponent => {
 					</section>
 				) : selectedIds.length > 1 ? (
 					<section className="rounded-lg border border-amber-500/30 bg-stone-900/80 p-3">
-						<h2 className="text-sm font-semibold text-amber-300">
+						<h3 className="text-sm font-semibold text-amber-300">
 							{selectedIds.length} Items Selected
-						</h2>
+						</h3>
 						<p className="mt-0.5 text-xs text-stone-400">
 							Drag selection on the grid to move together, or clone as a block.
 						</p>
 						<div className="mt-3 grid grid-cols-3 gap-1.5">
 							<button
-								className="inline-flex items-center justify-center gap-1 rounded border border-stone-700 bg-stone-800 px-2 py-1 text-xs font-medium text-stone-200 hover:text-amber-300"
+								className="anno-touch-target inline-flex items-center justify-center gap-1 rounded border border-stone-700 bg-stone-800 px-2 py-1.5 text-xs font-medium text-stone-200 hover:text-amber-300 lg:py-1"
 								type="button"
 								onClick={rotateActiveOrSelection}
 							>
@@ -575,7 +599,7 @@ export const InspectorPanel = (): FunctionComponent => {
 								Rotate
 							</button>
 							<button
-								className="inline-flex items-center justify-center gap-1 rounded border border-stone-700 bg-stone-800 px-2 py-1 text-xs font-medium text-stone-200 hover:text-amber-300"
+								className="anno-touch-target inline-flex items-center justify-center gap-1 rounded border border-stone-700 bg-stone-800 px-2 py-1.5 text-xs font-medium text-stone-200 hover:text-amber-300 lg:py-1"
 								type="button"
 								onClick={duplicateSelectedBuildings}
 							>
@@ -586,7 +610,7 @@ export const InspectorPanel = (): FunctionComponent => {
 								Clone
 							</button>
 							<button
-								className="inline-flex items-center justify-center gap-1 rounded border border-red-900/60 bg-red-950/40 px-2 py-1 text-xs font-medium text-red-300 hover:bg-red-900/50"
+								className="anno-touch-target inline-flex items-center justify-center gap-1 rounded border border-red-900/60 bg-red-950/40 px-2 py-1.5 text-xs font-medium text-red-300 hover:bg-red-900/50 lg:py-1"
 								type="button"
 								onClick={(): void => {
 									removeBuildings(selectedIds);
@@ -608,7 +632,7 @@ export const InspectorPanel = (): FunctionComponent => {
 								type="button"
 								onClick={cancelActiveAction}
 							>
-								Done (Esc)
+								Done
 							</button>
 						</div>
 						<div className="mt-2 flex items-center gap-2.5">
@@ -647,12 +671,12 @@ export const InspectorPanel = (): FunctionComponent => {
 						</div>
 						{activeBrushPreset.width !== activeBrushPreset.height && (
 							<button
-								className="mt-2.5 inline-flex w-full items-center justify-center gap-1.5 rounded border border-amber-500/30 bg-stone-900 py-1 text-xs font-medium text-amber-200 hover:bg-stone-800"
+								className="anno-touch-target mt-2.5 inline-flex w-full items-center justify-center gap-1.5 rounded border border-amber-500/30 bg-stone-900 py-1.5 text-xs font-medium text-amber-200 hover:bg-stone-800 lg:py-1"
 								type="button"
 								onClick={rotateActiveOrSelection}
 							>
 								<ArrowPathIcon aria-hidden="true" className="h-3.5 w-3.5" />
-								Rotate Footprint (R)
+								Rotate Footprint
 							</button>
 						)}
 					</section>
@@ -660,8 +684,9 @@ export const InspectorPanel = (): FunctionComponent => {
 					<section className="rounded-lg border border-stone-800 bg-stone-900/50 p-3 text-xs text-stone-400">
 						<p className="font-medium text-stone-200">Inspector Ready</p>
 						<p className="mt-1">
-							Click any building on the grid to inspect its service coverage,
-							road access, or rotate/clone it.
+							{isMobileDrawer
+								? "Tap any building on the grid to inspect its service coverage, road access, or rotate/clone it."
+								: "Click any building on the grid to inspect its service coverage, road access, or rotate/clone it."}
 						</p>
 					</section>
 				)}
@@ -669,9 +694,9 @@ export const InspectorPanel = (): FunctionComponent => {
 				{/* Section 2: Global Settlement Housing Health */}
 				{globalHousingHealth && (
 					<section className="rounded-lg border border-stone-800 bg-stone-900/50 p-3">
-						<h2 className="text-xs font-semibold tracking-wider text-stone-300 uppercase">
+						<h3 className="text-xs font-semibold tracking-wider text-stone-300 uppercase">
 							Housing Coverage
-						</h2>
+						</h3>
 						<div className="mt-2 grid grid-cols-2 gap-2 text-xs">
 							<div className="rounded bg-stone-950/80 p-2">
 								<span className="block text-[10px] text-stone-400">
@@ -697,9 +722,9 @@ export const InspectorPanel = (): FunctionComponent => {
 
 				{/* Section 3: Layout Dimensions & Efficiency */}
 				<section className="rounded-lg border border-stone-800 bg-stone-900/50 p-3">
-					<h2 className="text-xs font-semibold tracking-wider text-stone-300 uppercase">
+					<h3 className="text-xs font-semibold tracking-wider text-stone-300 uppercase">
 						Layout Footprint
-					</h2>
+					</h3>
 					<div className="mt-2 grid grid-cols-2 gap-2 text-xs">
 						<div className="rounded bg-stone-950/80 p-2">
 							<span className="block text-[10px] text-stone-400">
@@ -741,25 +766,32 @@ export const InspectorPanel = (): FunctionComponent => {
 				{/* Section 4: Placed Bill of Materials */}
 				<section className="flex flex-col rounded-lg border border-stone-800 bg-stone-900/50 p-3">
 					<div className="flex items-center justify-between">
-						<h2 className="text-xs font-semibold tracking-wider text-stone-300 uppercase">
+						<h3 className="text-xs font-semibold tracking-wider text-stone-300 uppercase">
 							Placed Buildings
-						</h2>
-						<span className="text-[10px] text-stone-500">Click to select</span>
+						</h3>
+						<span className="text-[10px] text-stone-500">
+							{isMobileDrawer ? "Tap to select" : "Click to select"}
+						</span>
 					</div>
 
 					{statistics.presetCounts.length === 0 ? (
 						<p className="mt-3 text-center text-xs text-stone-500">
-							Grid is empty. Pick or drag a preset from the left!
+							{isMobileDrawer
+								? "Grid is empty. Open Palette below to pick a building!"
+								: "Grid is empty. Pick or drag a preset from the left!"}
 						</p>
 					) : (
-						<ul className="mt-2 flex flex-col gap-1">
+						<ul className="mt-2 flex flex-col gap-1" role="list">
 							{statistics.presetCounts.map((entry) => (
 								<li key={entry.presetId}>
 									<button
-										className="flex w-full items-center justify-between rounded px-2 py-1 text-left text-xs hover:bg-stone-800"
+										className="anno-touch-target flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-stone-800 active:bg-stone-800 lg:py-1"
 										type="button"
 										onClick={(): void => {
 											selectByPresetId(entry.presetId);
+											if (isMobileDrawer) {
+												onCloseDrawer?.();
+											}
 										}}
 									>
 										<span className="flex min-w-0 items-center gap-2">
@@ -793,6 +825,23 @@ export const InspectorPanel = (): FunctionComponent => {
 					)}
 				</section>
 			</div>
+		</>
+	);
+
+	if (isMobileDrawer) {
+		return (
+			<div className="flex h-full min-h-0 flex-col border-l border-amber-500/20 bg-stone-950 text-stone-100">
+				{content}
+			</div>
+		);
+	}
+
+	return (
+		<aside
+			aria-label="Coverage Inspector and Layout Statistics"
+			className="flex min-h-0 flex-col border-l border-amber-500/20 bg-stone-950 text-stone-100"
+		>
+			{content}
 		</aside>
 	);
 };

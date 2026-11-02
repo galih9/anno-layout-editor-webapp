@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+@property --anno-drawer-backdrop {
+	syntax: "<number>";
+	inherits: true;
+	initial-value: 0;
+}
+
 @layer base {
 	html,
 	body,
@@ -9,16 +15,31 @@
 		margin: 0;
 		padding: 0;
 		overflow: clip;
+		overscroll-behavior: none;
 		background-color: #0c0a09;
 		color: #f5f5f4;
+		-webkit-tap-highlight-color: transparent;
 	}
 }
 
+dialog:modal {
+	overscroll-behavior: contain;
+}
+
 dialog::backdrop {
+	overflow: hidden;
+	overscroll-behavior: contain;
 	background-color: rgba(0, 0, 0, 0.6);
 	backdrop-filter: blur(2px);
 }
 
+.anno-pill-wrap {
+	display: flex;
+	flex-wrap: wrap;
+	flex-wrap: balance;
+}
+
+/* Workbench Shell Layout */
 .anno-workbench-shell {
 	display: grid;
 	block-size: 100dvh;
@@ -32,6 +53,9 @@ dialog::backdrop {
 
 .anno-workbench-shell > header {
 	grid-area: header;
+	padding-block-start: max(0.5rem, env(safe-area-inset-top));
+	padding-inline-start: max(0.75rem, env(safe-area-inset-left));
+	padding-inline-end: max(0.75rem, env(safe-area-inset-right));
 }
 
 .anno-workbench-shell > aside:first-of-type {
@@ -46,15 +70,159 @@ dialog::backdrop {
 	grid-area: inspector;
 }
 
-@media (max-width: 1024px) {
+@media (min-width: 1024px) and (max-width: 1279.98px) {
 	.anno-workbench-shell {
-		grid-template-columns: 250px minmax(0, 1fr);
+		grid-template-columns: 260px minmax(0, 1fr) 264px;
+	}
+}
+
+@media (max-width: 1023.98px) {
+	.anno-workbench-shell {
+		grid-template-rows: auto minmax(0, 1fr) auto;
+		grid-template-columns: minmax(0, 1fr);
 		grid-template-areas:
-			"header  header"
-			"palette canvas";
+			"header"
+			"canvas"
+			"dock";
 	}
 
-	.anno-workbench-shell > aside:last-of-type {
-		display: none;
+	.anno-workbench-shell > nav {
+		grid-area: dock;
+		padding-block-end: max(0.375rem, env(safe-area-inset-bottom));
+		padding-inline-start: max(0.5rem, env(safe-area-inset-left));
+		padding-inline-end: max(0.5rem, env(safe-area-inset-right));
+	}
+}
+
+/* Coarse-pointer touch target sizing */
+@media (pointer: coarse) {
+	.anno-touch-target {
+		min-block-size: 2.25rem;
+		min-inline-size: 2.25rem;
+	}
+}
+
+/* Swipeable Mobile & Tablet Slide Drawers (Scroll-Snap + Scroll-Driven Backdrop) */
+.anno-drawer {
+	--drawer-width: min(21rem, 86dvw);
+	--anno-drawer-backdrop: 0;
+	position: fixed;
+	inset: 0;
+	z-index: 40;
+	display: none;
+}
+
+.anno-drawer[data-open="true"] {
+	display: block;
+}
+
+.anno-drawer-backdrop {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	background-color: #000;
+	opacity: calc(var(--anno-drawer-backdrop) * 0.65);
+}
+
+.anno-drawer-scroller {
+	position: relative;
+	display: grid;
+	block-size: 100%;
+	inline-size: 100%;
+	overflow-x: scroll;
+	overflow-y: clip;
+	overscroll-behavior: none;
+	scrollbar-width: none;
+	scroll-snap-type: x mandatory;
+}
+
+.anno-drawer-scroller::-webkit-scrollbar {
+	display: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+	.anno-drawer-scroller {
+		scroll-behavior: smooth;
+	}
+}
+
+.anno-drawer[data-side="left"] .anno-drawer-scroller {
+	grid-template-columns: var(--drawer-width) 100%;
+}
+
+.anno-drawer[data-side="left"] .anno-drawer-scroller::after {
+	content: "";
+	scroll-snap-align: end;
+	scroll-initial-target: nearest;
+}
+
+.anno-drawer[data-side="right"] .anno-drawer-scroller {
+	grid-template-columns: 100% var(--drawer-width);
+}
+
+.anno-drawer[data-side="right"] .anno-drawer-scroller::before {
+	content: "";
+	scroll-snap-align: start;
+	scroll-initial-target: nearest;
+}
+
+.anno-drawer-sheet {
+	display: flex;
+	flex-direction: column;
+	block-size: 100svh;
+	min-block-size: 100%;
+	max-block-size: 100dvh;
+	overflow: clip;
+	padding-block-start: env(safe-area-inset-top);
+	padding-block-end: env(safe-area-inset-bottom);
+}
+
+.anno-drawer[data-side="left"] .anno-drawer-sheet {
+	scroll-snap-align: start;
+	padding-inline-start: env(safe-area-inset-left);
+}
+
+.anno-drawer[data-side="right"] .anno-drawer-sheet {
+	scroll-snap-align: end;
+	padding-inline-end: env(safe-area-inset-right);
+}
+
+@supports (animation-timeline: scroll()) {
+	.anno-drawer[data-side="left"] {
+		timeline-scope: --anno-drawer-left-fade;
+		animation: anno-fade-left-drawer linear both;
+		animation-timeline: --anno-drawer-left-fade;
+	}
+
+	.anno-drawer[data-side="left"] .anno-drawer-scroller {
+		scroll-timeline: --anno-drawer-left-fade x;
+	}
+
+	.anno-drawer[data-side="right"] {
+		timeline-scope: --anno-drawer-right-fade;
+		animation: anno-fade-right-drawer linear both;
+		animation-timeline: --anno-drawer-right-fade;
+	}
+
+	.anno-drawer[data-side="right"] .anno-drawer-scroller {
+		scroll-timeline: --anno-drawer-right-fade x;
+	}
+
+	@keyframes anno-fade-left-drawer {
+		0% {
+			--anno-drawer-backdrop: 1;
+		}
+		100% {
+			--anno-drawer-backdrop: 0;
+		}
+	}
+
+	@keyframes anno-fade-right-drawer {
+		0% {
+			--anno-drawer-backdrop: 0;
+		}
+		100% {
+			--anno-drawer-backdrop: 1;
+		}
 	}
 }

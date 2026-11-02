@@ -1,4 +1,5 @@
 import {
+	AdjustmentsHorizontalIcon,
 	ArrowPathIcon,
 	ArrowUturnLeftIcon,
 	ArrowUturnRightIcon,
@@ -12,25 +13,32 @@ import {
 	Squares2X2Icon,
 	SunIcon,
 	TrashIcon,
+	XMarkIcon,
 } from "@heroicons/react/24/outline";
 import type Konva from "konva";
-import { useId } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { FunctionComponent } from "../../../common/types";
 import { useDesignerStore } from "../../../store/designerStore";
 import type { ActiveTool, InfluenceDisplayMode } from "../types";
 import type { ModalTab } from "./TemplatesModal";
 
 export type TopToolbarProps = {
+	readonly isCompact?: boolean;
 	readonly onOpenModal: (tab: ModalTab) => void;
 	readonly stageRef: React.RefObject<Konva.Stage | null>;
 };
 
 export const TopToolbar = ({
+	isCompact = false,
 	onOpenModal,
 	stageRef,
 }: TopToolbarProps): FunctionComponent => {
 	const layoutNameInputId = useId();
 	const influenceSelectId = useId();
+	const mobileMenuId = useId();
+
+	const [isViewMenuOpen, setIsViewMenuOpen] = useState<boolean>(false);
+	const viewMenuContainerRef = useRef<HTMLDivElement | null>(null);
 
 	const layoutName = useDesignerStore((state) => state.layoutName);
 	const activeTool = useDesignerStore((state) => state.activeTool);
@@ -62,6 +70,33 @@ export const TopToolbar = ({
 	const setCanvasTheme = useDesignerStore((state) => state.setCanvasTheme);
 	const clearBoard = useDesignerStore((state) => state.clearBoard);
 
+	useEffect((): (() => void) => {
+		if (!isViewMenuOpen) {
+			return (): void => {};
+		}
+		const handlePointerDownOutside = (event: PointerEvent): void => {
+			const container = viewMenuContainerRef.current;
+			if (
+				container &&
+				event.target instanceof Node &&
+				!container.contains(event.target)
+			) {
+				setIsViewMenuOpen(false);
+			}
+		};
+		const handleEscape = (event: KeyboardEvent): void => {
+			if (event.key === "Escape") {
+				setIsViewMenuOpen(false);
+			}
+		};
+		document.addEventListener("pointerdown", handlePointerDownOutside);
+		document.addEventListener("keydown", handleEscape);
+		return (): void => {
+			document.removeEventListener("pointerdown", handlePointerDownOutside);
+			document.removeEventListener("keydown", handleEscape);
+		};
+	}, [isViewMenuOpen]);
+
 	const handleExportPng = (): void => {
 		const stage = stageRef.current;
 		if (!stage) {
@@ -81,6 +116,277 @@ export const TopToolbar = ({
 		anchor.click();
 		anchor.remove();
 	};
+
+	if (isCompact) {
+		return (
+			<header className="relative z-30 flex items-center justify-between gap-2 border-b border-amber-500/20 bg-stone-950 py-1.5 text-stone-100">
+				<div className="flex min-w-0 flex-1 items-center gap-2">
+					<span className="shrink-0 rounded bg-amber-400 px-1.5 py-0.5 font-serif text-xs font-extrabold tracking-wider text-stone-950">
+						1404
+					</span>
+					<label className="sr-only" htmlFor={layoutNameInputId}>
+						Layout Name
+					</label>
+					<input
+						className="min-w-0 flex-1 rounded border border-stone-800 bg-stone-900 px-2 py-1 text-base font-medium text-stone-100 focus:border-amber-400 focus:outline-none sm:max-w-60 sm:text-sm"
+						id={layoutNameInputId}
+						type="text"
+						value={layoutName}
+						onChange={(event): void => {
+							setLayoutName(event.target.value);
+						}}
+					/>
+				</div>
+
+				<div className="flex shrink-0 items-center gap-1">
+					<div className="flex items-center rounded-md border border-stone-800 bg-stone-900">
+						<button
+							aria-label="Undo"
+							className="anno-touch-target inline-flex items-center justify-center px-2 py-1.5 text-stone-200 active:bg-stone-800 disabled:opacity-35"
+							disabled={!canUndo}
+							type="button"
+							onClick={undo}
+						>
+							<ArrowUturnLeftIcon aria-hidden="true" className="h-4 w-4" />
+						</button>
+						<span aria-hidden="true" className="h-4 w-px bg-stone-800" />
+						<button
+							aria-label="Redo"
+							className="anno-touch-target inline-flex items-center justify-center px-2 py-1.5 text-stone-200 active:bg-stone-800 disabled:opacity-35"
+							disabled={!canRedo}
+							type="button"
+							onClick={redo}
+						>
+							<ArrowUturnRightIcon aria-hidden="true" className="h-4 w-4" />
+						</button>
+					</div>
+
+					<button
+						aria-label="Starter layouts"
+						className="anno-touch-target inline-flex items-center justify-center gap-1 rounded-md border border-amber-500/35 bg-amber-500/15 px-2 py-1.5 text-xs font-medium text-amber-300 active:bg-amber-500/25"
+						type="button"
+						onClick={(): void => {
+							setIsViewMenuOpen(false);
+							onOpenModal("templates");
+						}}
+					>
+						<SparklesIcon aria-hidden="true" className="h-4 w-4" />
+						<span className="hidden md:inline">Layouts</span>
+					</button>
+
+					<button
+						aria-label="Import, export, and grid settings"
+						className="anno-touch-target inline-flex items-center justify-center gap-1 rounded-md border border-stone-800 bg-stone-900 px-2 py-1.5 text-xs font-medium text-stone-200 active:bg-stone-800"
+						type="button"
+						onClick={(): void => {
+							setIsViewMenuOpen(false);
+							onOpenModal("io");
+						}}
+					>
+						<FolderOpenIcon aria-hidden="true" className="h-4 w-4" />
+						<span className="hidden md:inline">File</span>
+					</button>
+
+					<div ref={viewMenuContainerRef} className="relative">
+						<button
+							aria-controls={mobileMenuId}
+							aria-expanded={isViewMenuOpen}
+							aria-label="View overlays and board actions"
+							type="button"
+							className={`anno-touch-target inline-flex items-center justify-center gap-1 rounded-md border px-2 py-1.5 text-xs font-medium transition ${
+								isViewMenuOpen
+									? "border-amber-400 bg-amber-400 text-stone-950"
+									: "border-stone-800 bg-stone-900 text-stone-200 active:bg-stone-800"
+							}`}
+							onClick={(): void => {
+								setIsViewMenuOpen((previous) => !previous);
+							}}
+						>
+							<AdjustmentsHorizontalIcon
+								aria-hidden="true"
+								className="h-4 w-4"
+							/>
+							<span className="hidden sm:inline">View</span>
+						</button>
+
+						{isViewMenuOpen && (
+							<div
+								aria-label="View overlays and studio actions"
+								className="absolute right-0 mt-2 w-72 max-w-[calc(100dvw-1rem)] rounded-xl border border-amber-500/30 bg-stone-950 p-3 text-xs text-stone-100 shadow-2xl"
+								id={mobileMenuId}
+								role="region"
+							>
+								<div className="flex items-center justify-between border-b border-stone-800 pb-2">
+									<span className="font-semibold tracking-wider text-amber-300 uppercase">
+										View &amp; Actions
+									</span>
+									<button
+										aria-label="Close view menu"
+										className="rounded p-1 text-stone-400 hover:bg-stone-800 hover:text-stone-100"
+										type="button"
+										onClick={(): void => {
+											setIsViewMenuOpen(false);
+										}}
+									>
+										<XMarkIcon aria-hidden="true" className="h-4 w-4" />
+									</button>
+								</div>
+
+								<div className="mt-2.5 flex flex-col gap-3">
+									<div>
+										<label
+											className="block text-[11px] font-medium text-stone-400"
+											htmlFor={influenceSelectId}
+										>
+											Influence Radii Display
+										</label>
+										<select
+											className="mt-1 w-full rounded-md border border-stone-700 bg-stone-900 px-2.5 py-1.5 text-base font-medium text-amber-300 focus:border-amber-400 focus:outline-none sm:text-xs"
+											id={influenceSelectId}
+											value={influenceMode}
+											onChange={(event): void => {
+												setInfluenceMode(
+													event.target.value as InfluenceDisplayMode
+												);
+											}}
+										>
+											<option value="active">Selected / Hover</option>
+											<option value="services">All Public Services</option>
+											<option value="all">All Buildings</option>
+											<option value="none">Hidden</option>
+										</select>
+									</div>
+
+									<div className="grid grid-cols-2 gap-1.5">
+										<button
+											aria-pressed={showDiscreteTiles}
+											type="button"
+											className={`anno-touch-target rounded-md border px-2.5 py-2 text-xs font-medium ${
+												showDiscreteTiles
+													? "border-emerald-500/40 bg-emerald-500/20 text-emerald-300"
+													: "border-stone-800 bg-stone-900 text-stone-300"
+											}`}
+											onClick={toggleShowDiscreteTiles}
+										>
+											Tile Area
+										</button>
+										<button
+											aria-pressed={showGrid}
+											type="button"
+											className={`anno-touch-target rounded-md border px-2.5 py-2 text-xs font-medium ${
+												showGrid
+													? "border-amber-500/40 bg-amber-500/20 text-amber-300"
+													: "border-stone-800 bg-stone-900 text-stone-300"
+											}`}
+											onClick={toggleShowGrid}
+										>
+											Grid Lines
+										</button>
+										<button
+											aria-pressed={showIcons}
+											type="button"
+											className={`anno-touch-target rounded-md border px-2.5 py-2 text-xs font-medium ${
+												showIcons
+													? "border-amber-500/40 bg-amber-500/20 text-amber-300"
+													: "border-stone-800 bg-stone-900 text-stone-300"
+											}`}
+											onClick={toggleShowIcons}
+										>
+											Building Icons
+										</button>
+										<button
+											aria-pressed={showLabels}
+											type="button"
+											className={`anno-touch-target rounded-md border px-2.5 py-2 text-xs font-medium ${
+												showLabels
+													? "border-amber-500/40 bg-amber-500/20 text-amber-300"
+													: "border-stone-800 bg-stone-900 text-stone-300"
+											}`}
+											onClick={toggleShowLabels}
+										>
+											Text Labels
+										</button>
+									</div>
+
+									<div className="grid grid-cols-2 gap-1.5 border-t border-stone-800 pt-2.5">
+										<button
+											aria-pressed={activeTool === "eyedropper"}
+											type="button"
+											className={`anno-touch-target inline-flex items-center justify-center gap-1.5 rounded-md border px-2.5 py-2 text-xs font-medium ${
+												activeTool === "eyedropper"
+													? "border-amber-400 bg-amber-400 text-stone-950"
+													: "border-stone-800 bg-stone-900 text-stone-200"
+											}`}
+											onClick={(): void => {
+												setActiveTool("eyedropper");
+												setIsViewMenuOpen(false);
+											}}
+										>
+											<EyeDropperIcon aria-hidden="true" className="h-4 w-4" />
+											<span>Pick Tool</span>
+										</button>
+
+										<button
+											className="anno-touch-target inline-flex items-center justify-center gap-1.5 rounded-md border border-stone-800 bg-stone-900 px-2.5 py-2 text-xs font-medium text-stone-200"
+											type="button"
+											onClick={(): void => {
+												setCanvasTheme(
+													canvasTheme === "dark" ? "parchment" : "dark"
+												);
+											}}
+										>
+											<SunIcon aria-hidden="true" className="h-4 w-4" />
+											<span>
+												{canvasTheme === "dark" ? "Parchment" : "Dark Canvas"}
+											</span>
+										</button>
+
+										<button
+											className="anno-touch-target inline-flex items-center justify-center gap-1.5 rounded-md border border-stone-800 bg-stone-900 px-2.5 py-2 text-xs font-medium text-stone-200"
+											type="button"
+											onClick={(): void => {
+												handleExportPng();
+												setIsViewMenuOpen(false);
+											}}
+										>
+											<CameraIcon aria-hidden="true" className="h-4 w-4" />
+											<span>Export PNG</span>
+										</button>
+
+										<button
+											className="anno-touch-target inline-flex items-center justify-center gap-1.5 rounded-md border border-stone-800 bg-stone-900 px-2.5 py-2 text-xs font-medium text-stone-200"
+											type="button"
+											onClick={(): void => {
+												setIsViewMenuOpen(false);
+												onOpenModal("shortcuts");
+											}}
+										>
+											<QuestionMarkCircleIcon
+												aria-hidden="true"
+												className="h-4 w-4"
+											/>
+											<span>Help &amp; Controls</span>
+										</button>
+									</div>
+
+									<button
+										className="anno-touch-target w-full rounded-md border border-red-900/60 bg-red-950/40 py-2 text-xs font-medium text-red-300 active:bg-red-900/50"
+										type="button"
+										onClick={(): void => {
+											clearBoard();
+											setIsViewMenuOpen(false);
+										}}
+									>
+										Clear Entire Board
+									</button>
+								</div>
+							</div>
+						)}
+					</div>
+				</div>
+			</header>
+		);
+	}
 
 	const toolButtons: ReadonlyArray<{
 		readonly id: ActiveTool;

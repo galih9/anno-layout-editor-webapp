@@ -23,12 +23,18 @@ import {
 	toTileKey,
 } from "../gridMath";
 import { PRESET_BY_ID } from "../presetsData";
-import type { GridPoint, GridRect, PlacedBuilding } from "../types";
+import type {
+	BuildingPreset,
+	GridPoint,
+	GridRect,
+	PlacedBuilding,
+} from "../types";
 import { useImageCache } from "../useImageCache";
 
 export const CELL_SIZE = 28;
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 3.0;
+const TOUCH_PAN_EMPTY_BUTTON = -1;
 
 type ViewportTransform = {
 	readonly x: number;
@@ -67,6 +73,27 @@ type PaintStrokeSession = {
 	readonly lastCell: GridPoint;
 };
 
+type PendingTouchStroke = {
+	readonly mode: "place" | "erase";
+	readonly startTile: GridPoint;
+	readonly startClientX: number;
+	readonly startClientY: number;
+};
+
+type PinchZoomSession = {
+	readonly initialDistance: number;
+	readonly initialScale: number;
+	readonly anchorWorldX: number;
+	readonly anchorWorldY: number;
+};
+
+type StageTouchPoint = {
+	readonly stageX: number;
+	readonly stageY: number;
+	readonly clientX: number;
+	readonly clientY: number;
+};
+
 export type LayoutCanvasProps = {
 	readonly paletteDraggedPresetId: string | null;
 	readonly onClearPaletteDrag: () => void;
@@ -84,8 +111,8 @@ export const LayoutCanvas = ({
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const [stageSize, setStageSize] = useState<{ width: number; height: number }>(
 		{
-			width: 960,
-			height: 700,
+			width: 0,
+			height: 0,
 		}
 	);
 	const [viewport, setViewport] = useState<ViewportTransform>({
@@ -95,12 +122,18 @@ export const LayoutCanvas = ({
 	});
 	const [cursorCell, setCursorCell] = useState<GridPoint | null>(null);
 	const [isSpacePressed, setIsSpacePressed] = useState<boolean>(false);
+	const [isMultiSelectMode, setIsMultiSelectMode] = useState<boolean>(false);
 	const [dragMove, setDragMove] = useState<DragMoveSession | null>(null);
 	const [marquee, setMarquee] = useState<MarqueeSession | null>(null);
 	const [panSession, setPanSession] = useState<PanSession | null>(null);
 	const [isPaletteDragOver, setIsPaletteDragOver] = useState<boolean>(false);
 
 	const paintStrokeRef = useRef<PaintStrokeSession | null>(null);
+	const pendingTouchStrokeRef = useRef<PendingTouchStroke | null>(null);
+	const touchPlacePreviewRef = useRef<GridPoint | null>(null);
+	const pinchSessionRef = useRef<PinchZoomSession | null>(null);
+	const wasMultiTouchGestureRef = useRef<boolean>(false);
+	const lastTouchTimestampRef = useRef<number>(0);
 	const hasInitializedViewRef = useRef<boolean>(false);
 
 	const gridWidth = useDesignerStore((state) => state.gridWidth);
@@ -167,11 +200,11 @@ export const LayoutCanvas = ({
 			return (): void => {};
 		}
 		const updateSize = (): void => {
-			const rect = element.getBoundingClientRect();
-			if (rect.width > 0 && rect.height > 0) {
+			const bounds = element.getBoundingClientRect();
+			if (bounds.width > 0 && bounds.height > 0) {
 				setStageSize({
-					width: Math.floor(rect.width),
-					height: Math.floor(rect.height),
+					width: Math.floor(bounds.width),
+					height: Math.floor(bounds.height),
 				});
 			}
 		};
@@ -188,7 +221,7 @@ export const LayoutCanvas = ({
 			return;
 		}
 		if (buildings.length === 0) {
-			const defaultScale = 0.95;
+			const defaultScale = stageSize.width < 640 ? 0.65 : 0.95;
 			setViewport({
 				scale: defaultScale,
 				x: Math.round(
@@ -201,31 +234,32 @@ export const LayoutCanvas = ({
 			return;
 		}
 
-		let minX = Number.POSITIVE_INFINITY;
-		let minY = Number.POSITIVE_INFINITY;
-		let maxX = Number.NEGATIVE_INFINITY;
-		let maxY = Number.NEGATIVE_INFINITY;
+		let minimumX = Number.POSITIVE_INFINITY;
+		let minimumY = Number.POSITIVE_INFINITY;
+		let maximumX = Number.NEGATIVE_INFINITY;
+		let maximumY = Number.NEGATIVE_INFINITY;
 		for (const item of buildings) {
-			minX = Math.min(minX, item.x);
-			minY = Math.min(minY, item.y);
-			maxX = Math.max(maxX, item.x + item.width);
-			maxY = Math.max(maxY, item.y + item.height);
+			minimumX = Math.min(minimumX, item.x);
+			minimumY = Math.min(minimumY, item.y);
+			maximumX = Math.max(maximumX, item.x + item.width);
+			maximumY = Math.max(maximumY, item.y + item.height);
 		}
 
-		const paddingTiles = 8;
-		const contentWidthPx = (maxX - minX + paddingTiles * 2) * CELL_SIZE;
-		const contentHeightPx = (maxY - minY + paddingTiles * 2) * CELL_SIZE;
+		const paddingTiles = stageSize.width < 640 ? 4 : 8;
+		const contentWidthPx = (maximumX - minimumX + paddingTiles * 2) * CELL_SIZE;
+		const contentHeightPx =
+			(maximumY - minimumY + paddingTiles * 2) * CELL_SIZE;
 		const nextScale = clampValue(
 			Math.min(
 				stageSize.width / contentWidthPx,
 				stageSize.height / contentHeightPx
 			),
-			0.45,
+			MIN_SCALE,
 			1.35
 		);
 
-		const centerWorldX = ((minX + maxX) / 2) * CELL_SIZE;
-		const centerWorldY = ((minY + maxY) / 2) * CELL_SIZE;
+		const centerWorldX = ((minimumX + maximumX) / 2) * CELL_SIZE;
+		const centerWorldY = ((minimumY + maximumY) / 2) * CELL_SIZE;
 
 		setViewport({
 			scale: Number(nextScale.toFixed(3)),
@@ -235,11 +269,15 @@ export const LayoutCanvas = ({
 	}, [buildings, gridHeight, gridWidth, stageSize.height, stageSize.width]);
 
 	useEffect((): void => {
-		if (stageSize.width > 100 && !hasInitializedViewRef.current) {
+		if (
+			stageSize.width > 0 &&
+			stageSize.height > 0 &&
+			!hasInitializedViewRef.current
+		) {
 			hasInitializedViewRef.current = true;
 			fitLayoutInViewport();
 		}
-	}, [fitLayoutInViewport, stageSize.width]);
+	}, [fitLayoutInViewport, stageSize.height, stageSize.width]);
 
 	const previousFitVersionRef = useRef<number>(fitViewVersion);
 	useEffect((): void => {
@@ -329,6 +367,34 @@ export const LayoutCanvas = ({
 		[effectiveBuildings]
 	);
 
+	const computeSnappedOrigin = useCallback(
+		(
+			tile: GridPoint,
+			preset: BuildingPreset,
+			rotated: boolean
+		): {
+			readonly x: number;
+			readonly y: number;
+			readonly width: number;
+			readonly height: number;
+		} => {
+			const width = rotated ? preset.height : preset.width;
+			const height = rotated ? preset.width : preset.height;
+			const snappedX = clampValue(
+				Math.round(tile.x + 0.5 - width / 2),
+				0,
+				Math.max(0, gridWidth - width)
+			);
+			const snappedY = clampValue(
+				Math.round(tile.y + 0.5 - height / 2),
+				0,
+				Math.max(0, gridHeight - height)
+			);
+			return { x: snappedX, y: snappedY, width, height };
+		},
+		[gridHeight, gridWidth]
+	);
+
 	// Determine active ghost preset & snapped rectangle
 	const effectiveGhostPreset = useMemo(() => {
 		if (isPaletteDragOver && paletteDraggedPresetId) {
@@ -366,23 +432,12 @@ export const LayoutCanvas = ({
 			isPaletteDragOver && paletteDraggedPresetId
 		);
 		const rotated = isDraggingFromPalette ? false : placementRotated;
-		const width = rotated
-			? effectiveGhostPreset.height
-			: effectiveGhostPreset.width;
-		const height = rotated
-			? effectiveGhostPreset.width
-			: effectiveGhostPreset.height;
-
-		const snappedX = clampValue(
-			Math.round(cursorCell.x + 0.5 - width / 2),
-			0,
-			Math.max(0, gridWidth - width)
-		);
-		const snappedY = clampValue(
-			Math.round(cursorCell.y + 0.5 - height / 2),
-			0,
-			Math.max(0, gridHeight - height)
-		);
+		const {
+			x: snappedX,
+			y: snappedY,
+			width,
+			height,
+		} = computeSnappedOrigin(cursorCell, effectiveGhostPreset, rotated);
 
 		let valid = canPlaceBuilding(
 			buildings,
@@ -421,6 +476,7 @@ export const LayoutCanvas = ({
 		return { x: snappedX, y: snappedY, width, height, valid };
 	}, [
 		buildings,
+		computeSnappedOrigin,
 		cursorCell,
 		effectiveGhostPreset,
 		gridHeight,
@@ -705,8 +761,35 @@ export const LayoutCanvas = ({
 		[buildings]
 	);
 
+	const readStageTouches = useCallback(
+		(touchList: TouchList): Array<StageTouchPoint> => {
+			const container = containerRef.current;
+			if (!container) {
+				return [];
+			}
+			const bounds = container.getBoundingClientRect();
+			const points: Array<StageTouchPoint> = [];
+			for (let index = 0; index < touchList.length; index += 1) {
+				const touch = touchList.item(index);
+				if (touch) {
+					points.push({
+						stageX: touch.clientX - bounds.left,
+						stageY: touch.clientY - bounds.top,
+						clientX: touch.clientX,
+						clientY: touch.clientY,
+					});
+				}
+			}
+			return points;
+		},
+		[]
+	);
+
 	const handleStageMouseDown = useCallback(
 		(event: Konva.KonvaEventObject<MouseEvent>): void => {
+			if (Date.now() - lastTouchTimestampRef.current < 500) {
+				return;
+			}
 			const nativeEvent = event.evt;
 			const stage = event.target.getStage();
 			const pointer = stage?.getPointerPosition();
@@ -738,6 +821,7 @@ export const LayoutCanvas = ({
 
 			const tile = updateCursorFromStagePoint(pointer.x, pointer.y);
 			const { worldX, worldY } = screenToWorld(pointer.x, pointer.y);
+			const isAdditiveSelection = nativeEvent.shiftKey || isMultiSelectMode;
 
 			// Alt + Click anywhere acts as Eyedropper
 			if (nativeEvent.altKey || activeTool === "eyedropper") {
@@ -756,12 +840,16 @@ export const LayoutCanvas = ({
 			}
 
 			if (activeTool === "place" || activeTool === "road") {
-				if (ghostRect) {
+				const preset = activePresetId
+					? PRESET_BY_ID.get(activePresetId)
+					: undefined;
+				if (preset) {
+					const snapped = computeSnappedOrigin(tile, preset, placementRotated);
 					recordStrokeSnapshot();
-					placeBuildingAt(ghostRect.x, ghostRect.y, { recordHistory: false });
+					placeBuildingAt(snapped.x, snapped.y, { recordHistory: false });
 					paintStrokeRef.current = {
 						mode: "place",
-						lastCell: { x: ghostRect.x, y: ghostRect.y },
+						lastCell: { x: snapped.x, y: snapped.y },
 					};
 				}
 				return;
@@ -770,7 +858,7 @@ export const LayoutCanvas = ({
 			// Select tool: check if clicking on a placed building or starting marquee
 			const clickedBuilding = findBuildingAtTile(tile.x, tile.y);
 			if (clickedBuilding) {
-				if (nativeEvent.shiftKey) {
+				if (isAdditiveSelection) {
 					setSelectedIds([clickedBuilding.id], true);
 					return;
 				}
@@ -789,7 +877,7 @@ export const LayoutCanvas = ({
 					hasMoved: false,
 				});
 			} else {
-				if (!nativeEvent.shiftKey) {
+				if (!isAdditiveSelection) {
 					setSelectedIds([], false);
 				}
 				setMarquee({
@@ -797,17 +885,20 @@ export const LayoutCanvas = ({
 					startWorldY: worldY,
 					currentWorldX: worldX,
 					currentWorldY: worldY,
-					additive: nativeEvent.shiftKey,
+					additive: isAdditiveSelection,
 				});
 			}
 		},
 		[
+			activePresetId,
 			activeTool,
+			computeSnappedOrigin,
 			eraseAtCell,
 			findBuildingAtTile,
-			ghostRect,
+			isMultiSelectMode,
 			isSpacePressed,
 			placeBuildingAt,
+			placementRotated,
 			recordStrokeSnapshot,
 			screenToWorld,
 			selectPreset,
@@ -822,6 +913,9 @@ export const LayoutCanvas = ({
 
 	const handleStageMouseMove = useCallback(
 		(event: Konva.KonvaEventObject<MouseEvent>): void => {
+			if (Date.now() - lastTouchTimestampRef.current < 500) {
+				return;
+			}
 			const nativeEvent = event.evt;
 			const stage = event.target.getStage();
 			const pointer = stage?.getPointerPosition();
@@ -830,17 +924,17 @@ export const LayoutCanvas = ({
 			}
 
 			if (panSession) {
-				const dx = nativeEvent.clientX - panSession.startClientX;
-				const dy = nativeEvent.clientY - panSession.startClientY;
-				const distance = Math.hypot(dx, dy);
+				const deltaX = nativeEvent.clientX - panSession.startClientX;
+				const deltaY = nativeEvent.clientY - panSession.startClientY;
+				const distance = Math.hypot(deltaX, deltaY);
 				setPanSession({
 					...panSession,
 					movedDistance: Math.max(panSession.movedDistance, distance),
 				});
 				setViewport((current) => ({
 					...current,
-					x: Math.round(panSession.startViewportX + dx),
-					y: Math.round(panSession.startViewportY + dy),
+					x: Math.round(panSession.startViewportX + deltaX),
+					y: Math.round(panSession.startViewportY + deltaY),
 				}));
 				return;
 			}
@@ -891,24 +985,12 @@ export const LayoutCanvas = ({
 				}
 
 				if (activeStroke.mode === "place" && effectiveGhostPreset) {
-					const width = placementRotated
-						? effectiveGhostPreset.height
-						: effectiveGhostPreset.width;
-					const height = placementRotated
-						? effectiveGhostPreset.width
-						: effectiveGhostPreset.height;
-					const targetOrigin: GridPoint = {
-						x: clampValue(
-							Math.round(tile.x + 0.5 - width / 2),
-							0,
-							Math.max(0, gridWidth - width)
-						),
-						y: clampValue(
-							Math.round(tile.y + 0.5 - height / 2),
-							0,
-							Math.max(0, gridHeight - height)
-						),
-					};
+					const snapped = computeSnappedOrigin(
+						tile,
+						effectiveGhostPreset,
+						placementRotated
+					);
+					const targetOrigin: GridPoint = { x: snapped.x, y: snapped.y };
 					if (
 						targetOrigin.x !== activeStroke.lastCell.x ||
 						targetOrigin.y !== activeStroke.lastCell.y
@@ -935,12 +1017,11 @@ export const LayoutCanvas = ({
 			}
 		},
 		[
+			computeSnappedOrigin,
 			dragMove,
 			effectiveGhostPreset,
 			eraseAtCell,
 			findBuildingAtTile,
-			gridHeight,
-			gridWidth,
 			hoveredBuildingId,
 			marquee,
 			panSession,
@@ -968,6 +1049,11 @@ export const LayoutCanvas = ({
 					} else {
 						cancelActiveAction();
 					}
+				} else if (
+					panSession.button === TOUCH_PAN_EMPTY_BUTTON &&
+					panSession.movedDistance < 6
+				) {
+					setSelectedIds([], false);
 				}
 				setPanSession(null);
 			}
@@ -1025,10 +1111,470 @@ export const LayoutCanvas = ({
 
 	const handleStageMouseUp = useCallback(
 		(event: Konva.KonvaEventObject<MouseEvent>): void => {
+			if (Date.now() - lastTouchTimestampRef.current < 500) {
+				return;
+			}
 			const stage = event.target.getStage();
 			finalizePointerInteraction(stage?.getPointerPosition());
 		},
 		[finalizePointerInteraction]
+	);
+
+	// Touch gesture handlers (2-finger pinch-zoom + pan, 1-finger smart tool interaction)
+	const startPinchZoom = useCallback(
+		(firstTouch: StageTouchPoint, secondTouch: StageTouchPoint): void => {
+			wasMultiTouchGestureRef.current = true;
+			paintStrokeRef.current = null;
+			pendingTouchStrokeRef.current = null;
+			touchPlacePreviewRef.current = null;
+			setDragMove(null);
+			setMarquee(null);
+			setPanSession(null);
+			setCursorCell(null);
+
+			const midpointX = (firstTouch.stageX + secondTouch.stageX) / 2;
+			const midpointY = (firstTouch.stageY + secondTouch.stageY) / 2;
+			const initialDistance = Math.max(
+				8,
+				Math.hypot(
+					secondTouch.stageX - firstTouch.stageX,
+					secondTouch.stageY - firstTouch.stageY
+				)
+			);
+
+			pinchSessionRef.current = {
+				initialDistance,
+				initialScale: viewport.scale,
+				anchorWorldX: (midpointX - viewport.x) / viewport.scale,
+				anchorWorldY: (midpointY - viewport.y) / viewport.scale,
+			};
+		},
+		[viewport.scale, viewport.x, viewport.y]
+	);
+
+	const handleStageTouchStart = useCallback(
+		(event: Konva.KonvaEventObject<TouchEvent>): void => {
+			lastTouchTimestampRef.current = Date.now();
+			const nativeEvent = event.evt;
+			if (nativeEvent.cancelable) {
+				nativeEvent.preventDefault();
+			}
+
+			const touches = readStageTouches(nativeEvent.touches);
+			if (touches.length >= 2 && touches[0] && touches[1]) {
+				startPinchZoom(touches[0], touches[1]);
+				return;
+			}
+
+			if (touches.length !== 1 || !touches[0]) {
+				return;
+			}
+
+			wasMultiTouchGestureRef.current = false;
+			pinchSessionRef.current = null;
+			const touchPoint = touches[0];
+
+			if (activeTool === "pan" || isSpacePressed) {
+				setPanSession({
+					startClientX: touchPoint.clientX,
+					startClientY: touchPoint.clientY,
+					startViewportX: viewport.x,
+					startViewportY: viewport.y,
+					button: 0,
+					movedDistance: 0,
+				});
+				return;
+			}
+
+			const tile = updateCursorFromStagePoint(
+				touchPoint.stageX,
+				touchPoint.stageY
+			);
+			const { worldX, worldY } = screenToWorld(
+				touchPoint.stageX,
+				touchPoint.stageY
+			);
+
+			if (activeTool === "eyedropper") {
+				const picked = findBuildingAtTile(tile.x, tile.y);
+				if (picked) {
+					selectPreset(picked.presetId, picked.rotated);
+				}
+				setCursorCell(null);
+				return;
+			}
+
+			if (activeTool === "erase") {
+				pendingTouchStrokeRef.current = {
+					mode: "erase",
+					startTile: tile,
+					startClientX: touchPoint.clientX,
+					startClientY: touchPoint.clientY,
+				};
+				return;
+			}
+
+			if (activeTool === "road" || activeTool === "place") {
+				const preset = activePresetId
+					? PRESET_BY_ID.get(activePresetId)
+					: undefined;
+				if (!preset) {
+					return;
+				}
+				const isSingleTileBrush =
+					activeTool === "road" ||
+					(preset.width === 1 && preset.height === 1 && preset.isBorderless);
+				if (isSingleTileBrush) {
+					pendingTouchStrokeRef.current = {
+						mode: "place",
+						startTile: tile,
+						startClientX: touchPoint.clientX,
+						startClientY: touchPoint.clientY,
+					};
+				} else {
+					touchPlacePreviewRef.current = tile;
+				}
+				return;
+			}
+
+			// Select tool on touch
+			const clickedBuilding = findBuildingAtTile(tile.x, tile.y);
+			if (clickedBuilding) {
+				if (isMultiSelectMode) {
+					setSelectedIds([clickedBuilding.id], true);
+					return;
+				}
+				const nextMovingIds = selectedIdSet.has(clickedBuilding.id)
+					? selectedIds
+					: [clickedBuilding.id];
+				if (!selectedIdSet.has(clickedBuilding.id)) {
+					setSelectedIds([clickedBuilding.id], false);
+				}
+				setDragMove({
+					movingIds: nextMovingIds,
+					anchorWorldX: worldX,
+					anchorWorldY: worldY,
+					deltaX: 0,
+					deltaY: 0,
+					hasMoved: false,
+				});
+			} else if (isMultiSelectMode) {
+				setMarquee({
+					startWorldX: worldX,
+					startWorldY: worldY,
+					currentWorldX: worldX,
+					currentWorldY: worldY,
+					additive: true,
+				});
+			} else {
+				// 1-finger drag on empty canvas pans smoothly; tap deselects
+				setPanSession({
+					startClientX: touchPoint.clientX,
+					startClientY: touchPoint.clientY,
+					startViewportX: viewport.x,
+					startViewportY: viewport.y,
+					button: TOUCH_PAN_EMPTY_BUTTON,
+					movedDistance: 0,
+				});
+			}
+		},
+		[
+			activePresetId,
+			activeTool,
+			findBuildingAtTile,
+			isMultiSelectMode,
+			isSpacePressed,
+			readStageTouches,
+			screenToWorld,
+			selectPreset,
+			selectedIdSet,
+			selectedIds,
+			setSelectedIds,
+			startPinchZoom,
+			updateCursorFromStagePoint,
+			viewport.x,
+			viewport.y,
+		]
+	);
+
+	const handleStageTouchMove = useCallback(
+		(event: Konva.KonvaEventObject<TouchEvent>): void => {
+			lastTouchTimestampRef.current = Date.now();
+			const nativeEvent = event.evt;
+			if (nativeEvent.cancelable) {
+				nativeEvent.preventDefault();
+			}
+
+			const touches = readStageTouches(nativeEvent.touches);
+			if (touches.length >= 2 && touches[0] && touches[1]) {
+				if (!pinchSessionRef.current) {
+					startPinchZoom(touches[0], touches[1]);
+					return;
+				}
+				const session = pinchSessionRef.current;
+				const midpointX = (touches[0].stageX + touches[1].stageX) / 2;
+				const midpointY = (touches[0].stageY + touches[1].stageY) / 2;
+				const currentDistance = Math.max(
+					8,
+					Math.hypot(
+						touches[1].stageX - touches[0].stageX,
+						touches[1].stageY - touches[0].stageY
+					)
+				);
+				const nextScale = clampValue(
+					session.initialScale * (currentDistance / session.initialDistance),
+					MIN_SCALE,
+					MAX_SCALE
+				);
+				setViewport({
+					scale: Number(nextScale.toFixed(3)),
+					x: Math.round(midpointX - session.anchorWorldX * nextScale),
+					y: Math.round(midpointY - session.anchorWorldY * nextScale),
+				});
+				return;
+			}
+
+			if (
+				wasMultiTouchGestureRef.current ||
+				touches.length !== 1 ||
+				!touches[0]
+			) {
+				return;
+			}
+
+			const touchPoint = touches[0];
+
+			if (panSession) {
+				const deltaX = touchPoint.clientX - panSession.startClientX;
+				const deltaY = touchPoint.clientY - panSession.startClientY;
+				const distance = Math.hypot(deltaX, deltaY);
+				setPanSession({
+					...panSession,
+					movedDistance: Math.max(panSession.movedDistance, distance),
+				});
+				setViewport((current) => ({
+					...current,
+					x: Math.round(panSession.startViewportX + deltaX),
+					y: Math.round(panSession.startViewportY + deltaY),
+				}));
+				return;
+			}
+
+			const tile = updateCursorFromStagePoint(
+				touchPoint.stageX,
+				touchPoint.stageY
+			);
+			const { worldX, worldY } = screenToWorld(
+				touchPoint.stageX,
+				touchPoint.stageY
+			);
+
+			if (touchPlacePreviewRef.current) {
+				touchPlacePreviewRef.current = tile;
+				return;
+			}
+
+			const pendingStroke = pendingTouchStrokeRef.current;
+			if (pendingStroke) {
+				const fingerMoveDistance = Math.hypot(
+					touchPoint.clientX - pendingStroke.startClientX,
+					touchPoint.clientY - pendingStroke.startClientY
+				);
+				if (
+					fingerMoveDistance >= 6 ||
+					tile.x !== pendingStroke.startTile.x ||
+					tile.y !== pendingStroke.startTile.y
+				) {
+					pendingTouchStrokeRef.current = null;
+					recordStrokeSnapshot();
+					if (pendingStroke.mode === "erase") {
+						const initialCells = computeLineCells(
+							pendingStroke.startTile,
+							tile,
+							false
+						);
+						for (const point of initialCells) {
+							eraseAtCell(point.x, point.y, false);
+						}
+						paintStrokeRef.current = { mode: "erase", lastCell: tile };
+					} else if (effectiveGhostPreset) {
+						const startSnapped = computeSnappedOrigin(
+							pendingStroke.startTile,
+							effectiveGhostPreset,
+							placementRotated
+						);
+						const currentSnapped = computeSnappedOrigin(
+							tile,
+							effectiveGhostPreset,
+							placementRotated
+						);
+						const initialCells = computeLineCells(
+							{ x: startSnapped.x, y: startSnapped.y },
+							{ x: currentSnapped.x, y: currentSnapped.y },
+							false
+						);
+						for (const point of initialCells) {
+							placeBuildingAt(point.x, point.y, { recordHistory: false });
+						}
+						paintStrokeRef.current = {
+							mode: "place",
+							lastCell: { x: currentSnapped.x, y: currentSnapped.y },
+						};
+					}
+				}
+				return;
+			}
+
+			const activeStroke = paintStrokeRef.current;
+			if (activeStroke) {
+				if (activeStroke.mode === "erase") {
+					const cells = computeLineCells(activeStroke.lastCell, tile, false);
+					for (const point of cells) {
+						eraseAtCell(point.x, point.y, false);
+					}
+					paintStrokeRef.current = { mode: "erase", lastCell: tile };
+					return;
+				}
+				if (activeStroke.mode === "place" && effectiveGhostPreset) {
+					const snapped = computeSnappedOrigin(
+						tile,
+						effectiveGhostPreset,
+						placementRotated
+					);
+					const targetOrigin: GridPoint = { x: snapped.x, y: snapped.y };
+					if (
+						targetOrigin.x !== activeStroke.lastCell.x ||
+						targetOrigin.y !== activeStroke.lastCell.y
+					) {
+						const pathCells = computeLineCells(
+							activeStroke.lastCell,
+							targetOrigin,
+							false
+						);
+						for (const point of pathCells) {
+							placeBuildingAt(point.x, point.y, { recordHistory: false });
+						}
+						paintStrokeRef.current = { mode: "place", lastCell: targetOrigin };
+					}
+				}
+				return;
+			}
+
+			if (dragMove) {
+				const deltaGridX = Math.round(
+					(worldX - dragMove.anchorWorldX) / CELL_SIZE
+				);
+				const deltaGridY = Math.round(
+					(worldY - dragMove.anchorWorldY) / CELL_SIZE
+				);
+				if (deltaGridX !== dragMove.deltaX || deltaGridY !== dragMove.deltaY) {
+					setDragMove({
+						...dragMove,
+						deltaX: deltaGridX,
+						deltaY: deltaGridY,
+						hasMoved: dragMove.hasMoved || deltaGridX !== 0 || deltaGridY !== 0,
+					});
+				}
+				return;
+			}
+
+			if (marquee) {
+				setMarquee({
+					...marquee,
+					currentWorldX: worldX,
+					currentWorldY: worldY,
+				});
+			}
+		},
+		[
+			computeSnappedOrigin,
+			dragMove,
+			effectiveGhostPreset,
+			eraseAtCell,
+			marquee,
+			panSession,
+			placeBuildingAt,
+			placementRotated,
+			readStageTouches,
+			recordStrokeSnapshot,
+			screenToWorld,
+			startPinchZoom,
+			updateCursorFromStagePoint,
+		]
+	);
+
+	const handleStageTouchEnd = useCallback(
+		(event: Konva.KonvaEventObject<TouchEvent>): void => {
+			lastTouchTimestampRef.current = Date.now();
+			const nativeEvent = event.evt;
+			if (nativeEvent.cancelable) {
+				nativeEvent.preventDefault();
+			}
+
+			if (nativeEvent.touches.length > 0) {
+				pinchSessionRef.current = null;
+				return;
+			}
+
+			pinchSessionRef.current = null;
+			if (wasMultiTouchGestureRef.current) {
+				wasMultiTouchGestureRef.current = false;
+				return;
+			}
+
+			const pendingStroke = pendingTouchStrokeRef.current;
+			if (pendingStroke) {
+				pendingTouchStrokeRef.current = null;
+				if (pendingStroke.mode === "erase") {
+					eraseAtCell(
+						pendingStroke.startTile.x,
+						pendingStroke.startTile.y,
+						true
+					);
+				} else if (activePresetId) {
+					const preset = PRESET_BY_ID.get(activePresetId);
+					if (preset) {
+						const snapped = computeSnappedOrigin(
+							pendingStroke.startTile,
+							preset,
+							placementRotated
+						);
+						placeBuildingAt(snapped.x, snapped.y, { recordHistory: true });
+					}
+				}
+				setCursorCell(null);
+				return;
+			}
+
+			const previewTile = touchPlacePreviewRef.current;
+			if (previewTile) {
+				touchPlacePreviewRef.current = null;
+				const preset = activePresetId
+					? PRESET_BY_ID.get(activePresetId)
+					: undefined;
+				if (preset) {
+					const snapped = computeSnappedOrigin(
+						previewTile,
+						preset,
+						placementRotated
+					);
+					placeBuildingAt(snapped.x, snapped.y, { recordHistory: true });
+				}
+				setCursorCell(null);
+				return;
+			}
+
+			finalizePointerInteraction(null);
+			setCursorCell(null);
+		},
+		[
+			activePresetId,
+			computeSnappedOrigin,
+			eraseAtCell,
+			finalizePointerInteraction,
+			placeBuildingAt,
+			placementRotated,
+		]
 	);
 
 	// HTML5 Drag & Drop handlers from Sidebar Palette
@@ -1043,10 +1589,10 @@ export const LayoutCanvas = ({
 			if (!container) {
 				return;
 			}
-			const rect = container.getBoundingClientRect();
+			const bounds = container.getBoundingClientRect();
 			updateCursorFromStagePoint(
-				event.clientX - rect.left,
-				event.clientY - rect.top
+				event.clientX - bounds.left,
+				event.clientY - bounds.top
 			);
 		},
 		[isPaletteDragOver, updateCursorFromStagePoint]
@@ -1085,23 +1631,14 @@ export const LayoutCanvas = ({
 				return;
 			}
 
-			const rect = container.getBoundingClientRect();
+			const bounds = container.getBoundingClientRect();
 			const tile = updateCursorFromStagePoint(
-				event.clientX - rect.left,
-				event.clientY - rect.top
+				event.clientX - bounds.left,
+				event.clientY - bounds.top
 			);
-			const snappedX = clampValue(
-				Math.round(tile.x + 0.5 - preset.width / 2),
-				0,
-				Math.max(0, gridWidth - preset.width)
-			);
-			const snappedY = clampValue(
-				Math.round(tile.y + 0.5 - preset.height / 2),
-				0,
-				Math.max(0, gridHeight - preset.height)
-			);
+			const snapped = computeSnappedOrigin(tile, preset, false);
 
-			const createdId = placeBuildingAt(snappedX, snappedY, {
+			const createdId = placeBuildingAt(snapped.x, snapped.y, {
 				presetId,
 				rotated: false,
 				recordHistory: true,
@@ -1112,8 +1649,7 @@ export const LayoutCanvas = ({
 		},
 		[
 			activeTool,
-			gridHeight,
-			gridWidth,
+			computeSnappedOrigin,
 			onClearPaletteDrag,
 			paletteDraggedPresetId,
 			placeBuildingAt,
@@ -1157,7 +1693,7 @@ export const LayoutCanvas = ({
 		<main
 			ref={containerRef}
 			aria-label="Anno 1404 Layout Grid Canvas"
-			className="relative min-w-0 min-h-0 overflow-clip select-none"
+			className="relative min-h-0 min-w-0 touch-none overflow-clip select-none"
 			style={{
 				cursor: cursorStyle,
 				backgroundColor: isDark ? "#0f1218" : "#e5dcc5",
@@ -1172,15 +1708,19 @@ export const LayoutCanvas = ({
 			<Stage
 				ref={stageRef}
 				className="block"
-				height={stageSize.height}
+				height={Math.max(1, stageSize.height)}
 				scaleX={viewport.scale}
 				scaleY={viewport.scale}
-				width={stageSize.width}
+				width={Math.max(1, stageSize.width)}
 				x={viewport.x}
 				y={viewport.y}
 				onMouseDown={handleStageMouseDown}
 				onMouseMove={handleStageMouseMove}
 				onMouseUp={handleStageMouseUp}
+				onTouchCancel={handleStageTouchEnd}
+				onTouchEnd={handleStageTouchEnd}
+				onTouchMove={handleStageTouchMove}
+				onTouchStart={handleStageTouchStart}
 				onWheel={handleWheel}
 				onMouseLeave={(): void => {
 					setCursorCell(null);
@@ -1529,11 +2069,11 @@ export const LayoutCanvas = ({
 			</Stage>
 
 			{/* Bottom Canvas HUD Bar */}
-			<div className="pointer-events-none absolute inset-x-3 bottom-3 flex items-center justify-between gap-3">
-				<div className="pointer-events-auto flex shrink-0 items-center gap-1.5 rounded-lg border border-amber-500/25 bg-stone-950/90 px-2.5 py-1.5 text-xs text-stone-200 shadow-lg backdrop-blur-sm">
+			<div className="pointer-events-none absolute inset-x-2 bottom-2 flex items-center justify-between gap-2 sm:inset-x-3 sm:bottom-3 sm:gap-3">
+				<div className="pointer-events-auto flex max-w-full shrink-0 items-center gap-1 rounded-lg border border-amber-500/25 bg-stone-950/90 px-1.5 py-1 text-xs text-stone-200 shadow-lg backdrop-blur-sm sm:gap-1.5 sm:px-2.5 sm:py-1.5">
 					<button
 						aria-label="Zoom out"
-						className="rounded px-1.5 py-0.5 font-mono text-sm text-stone-300 hover:bg-stone-800 hover:text-amber-300"
+						className="anno-touch-target inline-flex items-center justify-center rounded px-2 py-0.5 font-mono text-sm text-stone-300 hover:bg-stone-800 hover:text-amber-300 active:bg-stone-800 sm:px-1.5"
 						type="button"
 						onClick={(): void => {
 							zoomAroundPoint(
@@ -1547,7 +2087,7 @@ export const LayoutCanvas = ({
 					</button>
 					<button
 						aria-label="Reset zoom to 100%"
-						className="min-w-12 rounded px-1.5 py-0.5 text-center font-mono text-amber-300 hover:bg-stone-800"
+						className="anno-touch-target inline-flex min-w-11 items-center justify-center rounded px-1 py-0.5 text-center font-mono text-amber-300 hover:bg-stone-800 active:bg-stone-800 sm:min-w-12 sm:px-1.5"
 						type="button"
 						onClick={(): void => {
 							zoomAroundPoint(1, stageSize.width / 2, stageSize.height / 2);
@@ -1557,7 +2097,7 @@ export const LayoutCanvas = ({
 					</button>
 					<button
 						aria-label="Zoom in"
-						className="rounded px-1.5 py-0.5 font-mono text-sm text-stone-300 hover:bg-stone-800 hover:text-amber-300"
+						className="anno-touch-target inline-flex items-center justify-center rounded px-2 py-0.5 font-mono text-sm text-stone-300 hover:bg-stone-800 hover:text-amber-300 active:bg-stone-800 sm:px-1.5"
 						type="button"
 						onClick={(): void => {
 							zoomAroundPoint(
@@ -1571,14 +2111,40 @@ export const LayoutCanvas = ({
 					</button>
 					<span aria-hidden="true" className="mx-0.5 h-3.5 w-px bg-stone-700" />
 					<button
-						className="rounded px-2 py-0.5 text-stone-300 hover:bg-stone-800 hover:text-amber-300"
+						className="anno-touch-target inline-flex items-center justify-center rounded px-2 py-0.5 text-stone-300 hover:bg-stone-800 hover:text-amber-300 active:bg-stone-800"
 						type="button"
 						onClick={fitLayoutInViewport}
 					>
-						Fit View
+						Fit
 					</button>
-					<span aria-hidden="true" className="mx-0.5 h-3.5 w-px bg-stone-700" />
-					<span className="min-w-22 font-mono text-[11px] text-stone-400">
+					{activeTool === "select" && (
+						<>
+							<span
+								aria-hidden="true"
+								className="mx-0.5 h-3.5 w-px bg-stone-700"
+							/>
+							<button
+								aria-label="Toggle multi-select mode"
+								aria-pressed={isMultiSelectMode}
+								type="button"
+								className={`anno-touch-target inline-flex items-center justify-center rounded px-2 py-0.5 font-medium transition ${
+									isMultiSelectMode
+										? "bg-amber-400 text-stone-950"
+										: "text-stone-300 hover:bg-stone-800 hover:text-amber-300"
+								}`}
+								onClick={(): void => {
+									setIsMultiSelectMode((previous) => !previous);
+								}}
+							>
+								+ Multi
+							</button>
+						</>
+					)}
+					<span
+						aria-hidden="true"
+						className="mx-0.5 hidden h-3.5 w-px bg-stone-700 sm:inline"
+					/>
+					<span className="hidden min-w-22 font-mono text-[11px] text-stone-400 sm:inline">
 						{cursorCell &&
 						cursorCell.x >= 0 &&
 						cursorCell.x < gridWidth &&
