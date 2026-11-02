@@ -1,4 +1,5 @@
 import { PRESET_BY_ID } from "./presetsData";
+import { getSpatialIndex } from "./spatialIndex";
 import type {
 	BuildingCategory,
 	BuildingPreset,
@@ -46,6 +47,15 @@ export const canPlaceBuilding = (
 		return false;
 	}
 
+	if (buildings.length > 8) {
+		return getSpatialIndex(buildings, gridWidth, gridHeight).canPlace(
+			candidate,
+			gridWidth,
+			gridHeight,
+			ignoreIds
+		);
+	}
+
 	for (const existing of buildings) {
 		if (ignoreIds?.has(existing.id)) {
 			continue;
@@ -71,13 +81,12 @@ export const isRectCoveredBySource = (
 	if (radius <= 0) {
 		return false;
 	}
-	const targetCenter = getRectCenter(target);
-	const sourceCenter = getRectCenter(source);
-	const distance = Math.hypot(
-		targetCenter.x - sourceCenter.x,
-		targetCenter.y - sourceCenter.y
-	);
-	return distance <= radius + 1e-6;
+	const deltaX =
+		target.x + target.width * 0.5 - (source.x + source.width * 0.5);
+	const deltaY =
+		target.y + target.height * 0.5 - (source.y + source.height * 0.5);
+	const threshold = radius + 1e-6;
+	return deltaX * deltaX + deltaY * deltaY <= threshold * threshold;
 };
 
 export const computeCoveredTileSpans = (

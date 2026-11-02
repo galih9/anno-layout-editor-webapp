@@ -58,7 +58,9 @@ export const TemplatesModal = ({
 	const layoutName = useDesignerStore((state) => state.layoutName);
 	const gridWidth = useDesignerStore((state) => state.gridWidth);
 	const gridHeight = useDesignerStore((state) => state.gridHeight);
-	const buildings = useDesignerStore((state) => state.buildings);
+	const buildingCount = useDesignerStore((state) =>
+		isOpen ? state.buildings.length : 0
+	);
 	const loadTemplateById = useDesignerStore((state) => state.loadTemplateById);
 	const importBuildings = useDesignerStore((state) => state.importBuildings);
 	const clearBoard = useDesignerStore((state) => state.clearBoard);
@@ -295,18 +297,19 @@ export const TemplatesModal = ({
 						{/* Export */}
 						<div>
 							<h3 className="text-xs font-semibold tracking-wider text-stone-300 uppercase">
-								Export Current Layout ({buildings.length} objects)
+								Export Current Layout ({buildingCount} objects)
 							</h3>
 							<div className="mt-2 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
 								<button
 									className="anno-touch-target inline-flex items-center justify-center gap-1.5 rounded-md bg-amber-400 px-3.5 py-2 text-xs font-semibold text-stone-950 hover:bg-amber-300"
 									type="button"
 									onClick={(): void => {
+										const currentState = useDesignerStore.getState();
 										const content = serializePlaygroundJson({
-											layoutName,
-											gridWidth,
-											gridHeight,
-											buildings,
+											layoutName: currentState.layoutName,
+											gridWidth: currentState.gridWidth,
+											gridHeight: currentState.gridHeight,
+											buildings: currentState.buildings,
 										});
 										triggerFileDownload(
 											`${safeSlug}.json`,
@@ -322,7 +325,9 @@ export const TemplatesModal = ({
 									className="anno-touch-target inline-flex items-center justify-center gap-1.5 rounded-md border border-stone-700 bg-stone-800 px-3.5 py-2 text-xs font-medium text-stone-100 hover:border-amber-400/50 hover:text-amber-300"
 									type="button"
 									onClick={(): void => {
-										const content = serializeAnnoDesignerAdJson(buildings);
+										const content = serializeAnnoDesignerAdJson(
+											useDesignerStore.getState().buildings
+										);
 										triggerFileDownload(
 											`${safeSlug}.ad`,
 											content,

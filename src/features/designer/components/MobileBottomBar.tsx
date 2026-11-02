@@ -14,8 +14,8 @@ import {
 import { useMemo } from "react";
 import type { FunctionComponent } from "../../../common/types";
 import { useDesignerStore } from "../../../store/designerStore";
-import { buildRoadTileKeySet, hasAdjacentRoadTile } from "../gridMath";
 import { PRESET_BY_ID } from "../presetsData";
+import { getSpatialIndex } from "../spatialIndex";
 import type { ActiveTool } from "../types";
 
 export type MobileDrawerKind = "palette" | "inspector";
@@ -36,6 +36,8 @@ export const MobileBottomBar = ({
 	onToggleDrawer,
 }: MobileBottomBarProps): FunctionComponent => {
 	const buildings = useDesignerStore((state) => state.buildings);
+	const gridWidth = useDesignerStore((state) => state.gridWidth);
+	const gridHeight = useDesignerStore((state) => state.gridHeight);
 	const activeTool = useDesignerStore((state) => state.activeTool);
 	const activePresetId = useDesignerStore((state) => state.activePresetId);
 	const placementRotated = useDesignerStore((state) => state.placementRotated);
@@ -53,17 +55,17 @@ export const MobileBottomBar = ({
 	);
 	const removeBuildings = useDesignerStore((state) => state.removeBuildings);
 
-	const roadTileKeys = useMemo(
-		() => buildRoadTileKeySet(buildings),
-		[buildings]
+	const spatialIndex = useMemo(
+		() => getSpatialIndex(buildings, gridWidth, gridHeight),
+		[buildings, gridHeight, gridWidth]
 	);
 
 	const singleSelectedBuilding = useMemo(() => {
-		if (selectedIds.length !== 1) {
+		if (selectedIds.length !== 1 || !selectedIds[0]) {
 			return null;
 		}
-		return buildings.find((item) => item.id === selectedIds[0]) ?? null;
-	}, [buildings, selectedIds]);
+		return spatialIndex.buildingById.get(selectedIds[0]) ?? null;
+	}, [selectedIds, spatialIndex]);
 
 	const singleSelectedPreset = useMemo(() => {
 		if (!singleSelectedBuilding) {
@@ -139,10 +141,7 @@ export const MobileBottomBar = ({
 										</span>
 										{!singleSelectedPreset.isRoad &&
 											singleSelectedPreset.group !== "Farm Fields" &&
-											(hasAdjacentRoadTile(
-												singleSelectedBuilding,
-												roadTileKeys
-											) ? (
+											(spatialIndex.hasAdjacentRoad(singleSelectedBuilding) ? (
 												<span className="inline-flex items-center gap-0.5 text-emerald-400">
 													<CheckCircleIcon
 														aria-hidden="true"

@@ -1,12 +1,26 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 const loadedImages = new Map<string, HTMLImageElement>();
 const pendingUrls = new Set<string>();
 const subscribers = new Set<() => void>();
+let isNotificationScheduled = false;
 
-const notifySubscribers = (): void => {
+const flushNotifications = (): void => {
+	isNotificationScheduled = false;
 	for (const listener of subscribers) {
 		listener();
+	}
+};
+
+const scheduleSubscriberNotification = (): void => {
+	if (isNotificationScheduled || subscribers.size === 0) {
+		return;
+	}
+	isNotificationScheduled = true;
+	if (typeof requestAnimationFrame === "function") {
+		requestAnimationFrame(flushNotifications);
+	} else {
+		queueMicrotask(flushNotifications);
 	}
 };
 
@@ -27,7 +41,7 @@ export const ensureImageLoaded = (
 		htmlImage.addEventListener("load", () => {
 			pendingUrls.delete(url);
 			loadedImages.set(url, htmlImage);
-			notifySubscribers();
+			scheduleSubscriberNotification();
 		});
 		htmlImage.addEventListener("error", () => {
 			pendingUrls.delete(url);
@@ -37,10 +51,10 @@ export const ensureImageLoaded = (
 	return undefined;
 };
 
-export const useImageCache = (
-	urls: ReadonlyArray<string | null | undefined>
-): ((url: string | null | undefined) => HTMLImageElement | undefined) => {
-	const [, setVersion] = useState<number>(0);
+export const useImageCacheVersion = (
+	urls?: ReadonlyArray<string | null | undefined>
+): number => {
+	const [version, setVersion] = useState<number>(0);
 
 	useEffect((): (() => void) => {
 		const handleUpdate = (): void => {
@@ -53,11 +67,25 @@ export const useImageCache = (
 	}, []);
 
 	useEffect((): void => {
+		if (!urls) {
+			return;
+		}
 		for (const url of urls) {
 			ensureImageLoaded(url);
 		}
 	}, [urls]);
 
-	return (url: string | null | undefined): HTMLImageElement | undefined =>
-		ensureImageLoaded(url);
+	return version;
+};
+
+export const useImageCache = (
+	urls: ReadonlyArray<string | null | undefined>
+): ((url: string | null | undefined) => HTMLImageElement | undefined) => {
+	useImageCacheVersion(urls);
+
+	return useCallback(
+		(url: string | null | undefined): HTMLImageElement | undefined =>
+			ensureImageLoaded(url),
+		[]
+	);
 };

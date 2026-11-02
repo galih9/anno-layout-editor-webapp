@@ -6,15 +6,10 @@ import {
 	TrashIcon,
 	XMarkIcon,
 } from "@heroicons/react/24/outline";
-import { useId, useMemo } from "react";
+import { useDeferredValue, useId, useMemo } from "react";
 import type { FunctionComponent } from "../../../common/types";
 import { useDesignerStore } from "../../../store/designerStore";
-import {
-	buildRoadTileKeySet,
-	computeLayoutStatistics,
-	hasAdjacentRoadTile,
-	isRectCoveredBySource,
-} from "../gridMath";
+import { computeLayoutStatistics, isRectCoveredBySource } from "../gridMath";
 import {
 	MARKETHOUSE_PRESET_IDS,
 	NORIA_PRESET_IDS,
@@ -25,6 +20,14 @@ import {
 	PRESET_BY_ID,
 	rgbaToHex,
 } from "../presetsData";
+import { getSpatialIndex } from "../spatialIndex";
+
+const COMMUNITY_PROVIDER_IDS = new Set<string>([
+	"Marketplace",
+	"Bazaar",
+	"ImperialCathedral",
+	"SultanMosque",
+]);
 
 export type InspectorPanelProps = {
 	readonly isMobileDrawer?: boolean;
@@ -39,6 +42,8 @@ export const InspectorPanel = ({
 	const customColorId = useId();
 
 	const buildings = useDesignerStore((state) => state.buildings);
+	const gridWidth = useDesignerStore((state) => state.gridWidth);
+	const gridHeight = useDesignerStore((state) => state.gridHeight);
 	const selectedIds = useDesignerStore((state) => state.selectedIds);
 	const activeTool = useDesignerStore((state) => state.activeTool);
 	const activePresetId = useDesignerStore((state) => state.activePresetId);
@@ -59,22 +64,30 @@ export const InspectorPanel = ({
 		(state) => state.cancelActiveAction
 	);
 
-	const statistics = useMemo(
-		() => computeLayoutStatistics(buildings),
-		[buildings]
+	// Defer aggregate layout statistics & BOM reconciliation during rapid brush strokes
+	const deferredBuildings = useDeferredValue(buildings);
+
+	const spatialIndex = useMemo(
+		() => getSpatialIndex(buildings, gridWidth, gridHeight),
+		[buildings, gridHeight, gridWidth]
 	);
 
-	const roadTileKeys = useMemo(
-		() => buildRoadTileKeySet(buildings),
-		[buildings]
+	const deferredSpatialIndex = useMemo(
+		() => getSpatialIndex(deferredBuildings, gridWidth, gridHeight),
+		[deferredBuildings, gridHeight, gridWidth]
+	);
+
+	const statistics = useMemo(
+		() => computeLayoutStatistics(deferredBuildings),
+		[deferredBuildings]
 	);
 
 	const singleSelectedBuilding = useMemo(() => {
-		if (selectedIds.length !== 1) {
+		if (selectedIds.length !== 1 || !selectedIds[0]) {
 			return null;
 		}
-		return buildings.find((item) => item.id === selectedIds[0]) ?? null;
-	}, [buildings, selectedIds]);
+		return spatialIndex.buildingById.get(selectedIds[0]) ?? null;
+	}, [selectedIds, spatialIndex]);
 
 	const singleSelectedPreset = useMemo(() => {
 		if (!singleSelectedBuilding) {
@@ -99,12 +112,12 @@ export const InspectorPanel = ({
 		let totalWorkshops = 0;
 		let coveredFields = 0;
 
-		for (const item of buildings) {
+		for (const item of spatialIndex.coverableBuildings) {
 			if (item.id === singleSelectedBuilding.id) {
 				continue;
 			}
 			const preset = PRESET_BY_ID.get(item.presetId);
-			if (!preset || preset.isRoad || preset.template === "Blocker") {
+			if (!preset) {
 				continue;
 			}
 			const isInside = isRectCoveredBySource(
@@ -140,7 +153,7 @@ export const InspectorPanel = ({
 			totalWorkshops,
 			coveredFields,
 		};
-	}, [buildings, singleSelectedBuilding, singleSelectedPreset]);
+	}, [singleSelectedBuilding, singleSelectedPreset, spatialIndex]);
 
 	// Service coverage checklist when a Residence is selected
 	const residenceServiceChecks = useMemo(() => {
@@ -158,22 +171,20 @@ export const InspectorPanel = ({
 		const definitions = isOccident
 			? OCCIDENT_SERVICE_NEEDS
 			: ORIENT_SERVICE_NEEDS;
+		const targetCenterX =
+			singleSelectedBuilding.x + singleSelectedBuilding.width * 0.5;
+		const targetCenterY =
+			singleSelectedBuilding.y + singleSelectedBuilding.height * 0.5;
 
 		return definitions.map((service) => {
 			const providerSet = new Set(service.providerPresetIds);
-			const isCovered = buildings.some((candidate) => {
-				if (!providerSet.has(candidate.presetId)) {
+			const isCovered = spatialIndex.influenceBuildings.some((candidate) => {
+				if (!providerSet.has(candidate.building.presetId)) {
 					return false;
 				}
-				const candidatePreset = PRESET_BY_ID.get(candidate.presetId);
-				if (!candidatePreset || candidatePreset.influenceRadius <= 0) {
-					return false;
-				}
-				return isRectCoveredBySource(
-					singleSelectedBuilding,
-					candidate,
-					candidatePreset.influenceRadius
-				);
+				const deltaX = targetCenterX - candidate.centerX;
+				const deltaY = targetCenterY - candidate.centerY;
+				return deltaX * deltaX + deltaY * deltaY <= candidate.thresholdSquared;
 			});
 
 			return {
@@ -183,7 +194,7 @@ export const InspectorPanel = ({
 				isCovered,
 			};
 		});
-	}, [buildings, singleSelectedBuilding]);
+	}, [singleSelectedBuilding, spatialIndex]);
 
 	// Farm / Production logistics checks (Markethouse + Noria)
 	const logisticsChecks = useMemo(() => {
@@ -197,67 +208,55 @@ export const InspectorPanel = ({
 			return null;
 		}
 
-		const hasMarkethouse = buildings.some((candidate) => {
-			if (!MARKETHOUSE_PRESET_IDS.has(candidate.presetId)) {
+		const targetCenterX =
+			singleSelectedBuilding.x + singleSelectedBuilding.width * 0.5;
+		const targetCenterY =
+			singleSelectedBuilding.y + singleSelectedBuilding.height * 0.5;
+
+		const hasMarkethouse = spatialIndex.influenceBuildings.some((candidate) => {
+			if (!MARKETHOUSE_PRESET_IDS.has(candidate.building.presetId)) {
 				return false;
 			}
-			const preset = PRESET_BY_ID.get(candidate.presetId);
-			return Boolean(
-				preset &&
-				isRectCoveredBySource(
-					singleSelectedBuilding,
-					candidate,
-					preset.influenceRadius
-				)
-			);
+			const deltaX = targetCenterX - candidate.centerX;
+			const deltaY = targetCenterY - candidate.centerY;
+			return deltaX * deltaX + deltaY * deltaY <= candidate.thresholdSquared;
 		});
 
-		const hasNoria = buildings.some((candidate) => {
-			if (!NORIA_PRESET_IDS.has(candidate.presetId)) {
+		const hasNoria = spatialIndex.influenceBuildings.some((candidate) => {
+			if (!NORIA_PRESET_IDS.has(candidate.building.presetId)) {
 				return false;
 			}
-			const preset = PRESET_BY_ID.get(candidate.presetId);
-			return Boolean(
-				preset &&
-				isRectCoveredBySource(
-					singleSelectedBuilding,
-					candidate,
-					preset.influenceRadius
-				)
-			);
+			const deltaX = targetCenterX - candidate.centerX;
+			const deltaY = targetCenterY - candidate.centerY;
+			return deltaX * deltaX + deltaY * deltaY <= candidate.thresholdSquared;
 		});
 
 		return { hasMarkethouse, hasNoria };
-	}, [buildings, singleSelectedBuilding, singleSelectedPreset]);
+	}, [singleSelectedBuilding, singleSelectedPreset, spatialIndex]);
 
-	// Global settlement housing check
+	// Global settlement housing check powered by O(1) road adjacency & pre-indexed providers
 	const globalHousingHealth = useMemo(() => {
-		const residences = buildings.filter((item) => {
-			const preset = PRESET_BY_ID.get(item.presetId);
-			return preset?.category === "residence";
-		});
+		const residences = deferredSpatialIndex.residences;
 		if (residences.length === 0) {
 			return null;
 		}
 
-		const communityProviders = buildings.filter((item) =>
-			["Marketplace", "Bazaar", "ImperialCathedral", "SultanMosque"].includes(
-				item.presetId
-			)
+		const communityProviders = deferredSpatialIndex.influenceBuildings.filter(
+			(entry) => COMMUNITY_PROVIDER_IDS.has(entry.building.presetId)
 		);
 		let marketCoveredCount = 0;
 		let roadConnectedCount = 0;
 
 		for (const residence of residences) {
-			if (hasAdjacentRoadTile(residence, roadTileKeys)) {
+			if (deferredSpatialIndex.hasAdjacentRoad(residence)) {
 				roadConnectedCount += 1;
 			}
+			const residenceCenterX = residence.x + residence.width * 0.5;
+			const residenceCenterY = residence.y + residence.height * 0.5;
 			const coveredByMarket = communityProviders.some((provider) => {
-				const preset = PRESET_BY_ID.get(provider.presetId);
-				return Boolean(
-					preset &&
-					isRectCoveredBySource(residence, provider, preset.influenceRadius)
-				);
+				const deltaX = residenceCenterX - provider.centerX;
+				const deltaY = residenceCenterY - provider.centerY;
+				return deltaX * deltaX + deltaY * deltaY <= provider.thresholdSquared;
 			});
 			if (coveredByMarket) {
 				marketCoveredCount += 1;
@@ -269,7 +268,7 @@ export const InspectorPanel = ({
 			marketCoveredCount,
 			roadConnectedCount,
 		};
-	}, [buildings, roadTileKeys]);
+	}, [deferredSpatialIndex]);
 
 	const activeBrushPreset =
 		(activeTool === "place" || activeTool === "road") && activePresetId
@@ -347,10 +346,7 @@ export const InspectorPanel = ({
 									)}
 									{!singleSelectedPreset.isRoad &&
 										singleSelectedPreset.group !== "Farm Fields" &&
-										(hasAdjacentRoadTile(
-											singleSelectedBuilding,
-											roadTileKeys
-										) ? (
+										(spatialIndex.hasAdjacentRoad(singleSelectedBuilding) ? (
 											<span className="inline-flex items-center gap-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-300">
 												<CheckCircleIcon
 													aria-hidden="true"

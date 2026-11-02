@@ -1,62 +1,45 @@
 import type Konva from "konva";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-	Circle,
-	Group,
-	Image as KonvaImage,
-	Layer,
-	Line,
-	Rect,
-	Stage,
-	Text,
-} from "react-konva";
+import { Stage } from "react-konva";
 import type { FunctionComponent } from "../../../common/types";
 import { useDesignerStore } from "../../../store/designerStore";
-import {
-	buildRoadTileKeySet,
-	canPlaceBuilding,
-	computeCoveredTileSpans,
-	computeLineCells,
-	getRectCenter,
-	isRectCoveredBySource,
-	rectanglesOverlap,
-	toTileKey,
-} from "../gridMath";
+import { computeCoveredTileSpans, computeLineCells } from "../gridMath";
 import { PRESET_BY_ID } from "../presetsData";
+import { getSpatialIndex } from "../spatialIndex";
 import type {
 	BuildingPreset,
 	GridPoint,
 	GridRect,
 	PlacedBuilding,
+	TileSpan,
 } from "../types";
-import { useImageCache } from "../useImageCache";
+import { ensureImageLoaded, useImageCacheVersion } from "../useImageCache";
+import {
+	BuildingsLayer,
+	CELL_SIZE,
+	type DragMoveSession,
+	DynamicOverlayLayer,
+	type GhostPlacementRect,
+	GridLayer,
+	InfluenceLayer,
+	type MarqueeSession,
+	type VisibleInfluenceSource,
+} from "./canvasLayers";
 
-export const CELL_SIZE = 28;
+export { CELL_SIZE } from "./canvasLayers";
+
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 3.0;
 const TOUCH_PAN_EMPTY_BUTTON = -1;
+
+const EMPTY_STRING_SET: ReadonlySet<string> = new Set<string>();
+const EMPTY_INFLUENCE_SOURCES: ReadonlyArray<VisibleInfluenceSource> = [];
+const EMPTY_TILE_SPANS: ReadonlyArray<TileSpan> = [];
 
 type ViewportTransform = {
 	readonly x: number;
 	readonly y: number;
 	readonly scale: number;
-};
-
-type DragMoveSession = {
-	readonly movingIds: ReadonlyArray<string>;
-	readonly anchorWorldX: number;
-	readonly anchorWorldY: number;
-	readonly deltaX: number;
-	readonly deltaY: number;
-	readonly hasMoved: boolean;
-};
-
-type MarqueeSession = {
-	readonly startWorldX: number;
-	readonly startWorldY: number;
-	readonly currentWorldX: number;
-	readonly currentWorldY: number;
-	readonly additive: boolean;
 };
 
 type PanSession = {
@@ -65,12 +48,13 @@ type PanSession = {
 	readonly startViewportX: number;
 	readonly startViewportY: number;
 	readonly button: number;
-	readonly movedDistance: number;
+	movedDistance: number;
 };
 
 type PaintStrokeSession = {
 	readonly mode: "place" | "erase";
 	readonly lastCell: GridPoint;
+	readonly hasRecordedHistory: boolean;
 };
 
 type PendingTouchStroke = {
@@ -103,12 +87,30 @@ export type LayoutCanvasProps = {
 const clampValue = (value: number, minimum: number, maximum: number): number =>
 	Math.max(minimum, Math.min(maximum, value));
 
+const rectanglesOverlapFast = (first: GridRect, second: GridRect): boolean =>
+	first.x < second.x + second.width &&
+	first.x + first.width > second.x &&
+	first.y < second.y + second.height &&
+	first.y + first.height > second.y;
+
 export const LayoutCanvas = ({
 	paletteDraggedPresetId,
 	onClearPaletteDrag,
 	stageRef,
 }: LayoutCanvasProps): FunctionComponent => {
 	const containerRef = useRef<HTMLDivElement | null>(null);
+	const containerBoundsRef = useRef<{
+		left: number;
+		top: number;
+		width: number;
+		height: number;
+	}>({
+		left: 0,
+		top: 0,
+		width: 0,
+		height: 0,
+	});
+
 	const [stageSize, setStageSize] = useState<{ width: number; height: number }>(
 		{
 			width: 0,
@@ -120,14 +122,20 @@ export const LayoutCanvas = ({
 		y: 0,
 		scale: 0.9,
 	});
+	const viewportRef = useRef<ViewportTransform>(viewport);
+	const viewportAnimationFrameRef = useRef<number | null>(null);
+
 	const [cursorCell, setCursorCell] = useState<GridPoint | null>(null);
+	const cursorCellRef = useRef<GridPoint | null>(null);
+
 	const [isSpacePressed, setIsSpacePressed] = useState<boolean>(false);
 	const [isMultiSelectMode, setIsMultiSelectMode] = useState<boolean>(false);
 	const [dragMove, setDragMove] = useState<DragMoveSession | null>(null);
 	const [marquee, setMarquee] = useState<MarqueeSession | null>(null);
-	const [panSession, setPanSession] = useState<PanSession | null>(null);
+	const [isPanning, setIsPanning] = useState<boolean>(false);
 	const [isPaletteDragOver, setIsPaletteDragOver] = useState<boolean>(false);
 
+	const panSessionRef = useRef<PanSession | null>(null);
 	const paintStrokeRef = useRef<PaintStrokeSession | null>(null);
 	const pendingTouchStrokeRef = useRef<PendingTouchStroke | null>(null);
 	const touchPlacePreviewRef = useRef<GridPoint | null>(null);
@@ -160,11 +168,12 @@ export const LayoutCanvas = ({
 	const cancelActiveAction = useDesignerStore(
 		(state) => state.cancelActiveAction
 	);
-	const recordStrokeSnapshot = useDesignerStore(
-		(state) => state.recordStrokeSnapshot
-	);
 	const placeBuildingAt = useDesignerStore((state) => state.placeBuildingAt);
+	const placeBuildingsAtPoints = useDesignerStore(
+		(state) => state.placeBuildingsAtPoints
+	);
 	const eraseAtCell = useDesignerStore((state) => state.eraseAtCell);
+	const eraseAtCells = useDesignerStore((state) => state.eraseAtCells);
 	const moveBuildingsByDelta = useDesignerStore(
 		(state) => state.moveBuildingsByDelta
 	);
@@ -173,56 +182,111 @@ export const LayoutCanvas = ({
 		(state) => state.setHoveredBuildingId
 	);
 
-	// Preload icons for placed buildings + active/dragged preset
-	const neededIconUrls = useMemo((): Array<string | null> => {
-		const urls = new Set<string | null>();
-		for (const item of buildings) {
-			const preset = PRESET_BY_ID.get(item.presetId);
-			if (preset?.iconUrl) {
-				urls.add(preset.iconUrl);
-			}
-		}
+	const imageCacheVersion = useImageCacheVersion();
+
+	useEffect((): void => {
 		if (activePresetId) {
-			urls.add(PRESET_BY_ID.get(activePresetId)?.iconUrl ?? null);
+			ensureImageLoaded(PRESET_BY_ID.get(activePresetId)?.iconUrl);
 		}
 		if (paletteDraggedPresetId) {
-			urls.add(PRESET_BY_ID.get(paletteDraggedPresetId)?.iconUrl ?? null);
+			ensureImageLoaded(PRESET_BY_ID.get(paletteDraggedPresetId)?.iconUrl);
 		}
-		return [...urls];
-	}, [buildings, activePresetId, paletteDraggedPresetId]);
+	}, [activePresetId, paletteDraggedPresetId]);
 
-	const getCachedImage = useImageCache(neededIconUrls);
+	const syncContainerBounds = useCallback((): void => {
+		const element = containerRef.current;
+		if (!element) {
+			return;
+		}
+		const bounds = element.getBoundingClientRect();
+		containerBoundsRef.current = {
+			left: bounds.left,
+			top: bounds.top,
+			width: bounds.width,
+			height: bounds.height,
+		};
+		if (bounds.width > 0 && bounds.height > 0) {
+			const nextWidth = Math.floor(bounds.width);
+			const nextHeight = Math.floor(bounds.height);
+			setStageSize((previous) =>
+				previous.width === nextWidth && previous.height === nextHeight
+					? previous
+					: { width: nextWidth, height: nextHeight }
+			);
+		}
+	}, []);
 
-	// Track container dimensions
+	// Track container dimensions & cached client offset without layout thrashing
 	useEffect((): (() => void) => {
 		const element = containerRef.current;
 		if (!element) {
 			return (): void => {};
 		}
-		const updateSize = (): void => {
-			const bounds = element.getBoundingClientRect();
-			if (bounds.width > 0 && bounds.height > 0) {
-				setStageSize({
-					width: Math.floor(bounds.width),
-					height: Math.floor(bounds.height),
-				});
-			}
-		};
-		updateSize();
-		const observer = new ResizeObserver(updateSize);
+		syncContainerBounds();
+		const observer = new ResizeObserver(syncContainerBounds);
 		observer.observe(element);
+		window.addEventListener("resize", syncContainerBounds, { passive: true });
 		return (): void => {
 			observer.disconnect();
+			window.removeEventListener("resize", syncContainerBounds);
+		};
+	}, [syncContainerBounds]);
+
+	useEffect((): (() => void) => {
+		return (): void => {
+			if (viewportAnimationFrameRef.current !== null) {
+				cancelAnimationFrame(viewportAnimationFrameRef.current);
+				viewportAnimationFrameRef.current = null;
+			}
 		};
 	}, []);
+
+	const applyViewportImmediate = useCallback(
+		(nextViewport: ViewportTransform): void => {
+			if (viewportAnimationFrameRef.current !== null) {
+				cancelAnimationFrame(viewportAnimationFrameRef.current);
+				viewportAnimationFrameRef.current = null;
+			}
+			viewportRef.current = nextViewport;
+			stageRef.current?.setAttrs({
+				x: nextViewport.x,
+				y: nextViewport.y,
+				scaleX: nextViewport.scale,
+				scaleY: nextViewport.scale,
+			});
+			setViewport(nextViewport);
+		},
+		[stageRef]
+	);
+
+	const applyViewportSmooth = useCallback(
+		(nextViewport: ViewportTransform): void => {
+			viewportRef.current = nextViewport;
+			stageRef.current?.setAttrs({
+				x: nextViewport.x,
+				y: nextViewport.y,
+				scaleX: nextViewport.scale,
+				scaleY: nextViewport.scale,
+			});
+			stageRef.current?.batchDraw();
+			if (viewportAnimationFrameRef.current === null) {
+				viewportAnimationFrameRef.current = requestAnimationFrame(() => {
+					viewportAnimationFrameRef.current = null;
+					setViewport(viewportRef.current);
+				});
+			}
+		},
+		[stageRef]
+	);
 
 	const fitLayoutInViewport = useCallback((): void => {
 		if (stageSize.width <= 0 || stageSize.height <= 0) {
 			return;
 		}
-		if (buildings.length === 0) {
+		const currentBuildings = useDesignerStore.getState().buildings;
+		if (currentBuildings.length === 0) {
 			const defaultScale = stageSize.width < 640 ? 0.65 : 0.95;
-			setViewport({
+			applyViewportImmediate({
 				scale: defaultScale,
 				x: Math.round(
 					stageSize.width / 2 - (gridWidth * CELL_SIZE * defaultScale) / 2
@@ -238,7 +302,7 @@ export const LayoutCanvas = ({
 		let minimumY = Number.POSITIVE_INFINITY;
 		let maximumX = Number.NEGATIVE_INFINITY;
 		let maximumY = Number.NEGATIVE_INFINITY;
-		for (const item of buildings) {
+		for (const item of currentBuildings) {
 			minimumX = Math.min(minimumX, item.x);
 			minimumY = Math.min(minimumY, item.y);
 			maximumX = Math.max(maximumX, item.x + item.width);
@@ -261,12 +325,18 @@ export const LayoutCanvas = ({
 		const centerWorldX = ((minimumX + maximumX) / 2) * CELL_SIZE;
 		const centerWorldY = ((minimumY + maximumY) / 2) * CELL_SIZE;
 
-		setViewport({
+		applyViewportImmediate({
 			scale: Number(nextScale.toFixed(3)),
 			x: Math.round(stageSize.width / 2 - centerWorldX * nextScale),
 			y: Math.round(stageSize.height / 2 - centerWorldY * nextScale),
 		});
-	}, [buildings, gridHeight, gridWidth, stageSize.height, stageSize.width]);
+	}, [
+		applyViewportImmediate,
+		gridHeight,
+		gridWidth,
+		stageSize.height,
+		stageSize.width,
+	]);
 
 	useEffect((): void => {
 		if (
@@ -301,7 +371,7 @@ export const LayoutCanvas = ({
 			}
 			if (event.code === "Space") {
 				event.preventDefault();
-				setIsSpacePressed(true);
+				setIsSpacePressed((previous) => (previous ? previous : true));
 			}
 		};
 		const handleKeyUp = (event: KeyboardEvent): void => {
@@ -317,55 +387,53 @@ export const LayoutCanvas = ({
 		};
 	}, []);
 
-	// Effective buildings accounting for live drag-move preview
-	const movingIdSet = useMemo(
-		(): Set<string> => new Set(dragMove?.movingIds ?? []),
-		[dragMove]
+	// Shared O(1) spatial grid index for current buildings
+	const spatialIndex = useMemo(
+		() => getSpatialIndex(buildings, gridWidth, gridHeight),
+		[buildings, gridHeight, gridWidth]
 	);
 
-	const effectiveBuildings = useMemo((): ReadonlyArray<PlacedBuilding> => {
-		if (!dragMove || (dragMove.deltaX === 0 && dragMove.deltaY === 0)) {
-			return buildings;
-		}
-		return buildings.map((building) =>
-			movingIdSet.has(building.id)
-				? {
-						...building,
-						x: building.x + dragMove.deltaX,
-						y: building.y + dragMove.deltaY,
-					}
-				: building
-		);
-	}, [buildings, dragMove, movingIdSet]);
+	// Stable moving ID set across drag deltas so stationary BuildingsLayer never redraws mid-drag
+	const movingIdList = dragMove?.movingIds;
+	const movingIdSet = useMemo(
+		(): ReadonlySet<string> =>
+			movingIdList && movingIdList.length > 0
+				? new Set(movingIdList)
+				: EMPTY_STRING_SET,
+		[movingIdList]
+	);
+
+	const isActivelyDraggingSelection = Boolean(
+		dragMove && (dragMove.deltaX !== 0 || dragMove.deltaY !== 0)
+	);
+
+	const hiddenBuildingIds = isActivelyDraggingSelection
+		? movingIdSet
+		: EMPTY_STRING_SET;
 
 	const isDragMoveValid = useMemo((): boolean => {
 		if (!dragMove || (dragMove.deltaX === 0 && dragMove.deltaY === 0)) {
 			return true;
 		}
-		for (const item of effectiveBuildings) {
-			if (!movingIdSet.has(item.id)) {
+		for (const movingId of dragMove.movingIds) {
+			const baseItem = spatialIndex.buildingById.get(movingId);
+			if (!baseItem) {
 				continue;
 			}
+			const candidate: GridRect = {
+				x: baseItem.x + dragMove.deltaX,
+				y: baseItem.y + dragMove.deltaY,
+				width: baseItem.width,
+				height: baseItem.height,
+			};
 			if (
-				!canPlaceBuilding(buildings, item, gridWidth, gridHeight, movingIdSet)
+				!spatialIndex.canPlace(candidate, gridWidth, gridHeight, movingIdSet)
 			) {
 				return false;
 			}
 		}
 		return true;
-	}, [
-		buildings,
-		dragMove,
-		effectiveBuildings,
-		gridHeight,
-		gridWidth,
-		movingIdSet,
-	]);
-
-	const roadTileKeys = useMemo(
-		(): Set<string> => buildRoadTileKeySet(effectiveBuildings),
-		[effectiveBuildings]
-	);
+	}, [dragMove, gridHeight, gridWidth, movingIdSet, spatialIndex]);
 
 	const computeSnappedOrigin = useCallback(
 		(
@@ -396,7 +464,7 @@ export const LayoutCanvas = ({
 	);
 
 	// Determine active ghost preset & snapped rectangle
-	const effectiveGhostPreset = useMemo(() => {
+	const effectiveGhostPreset = useMemo((): BuildingPreset | null => {
 		if (isPaletteDragOver && paletteDraggedPresetId) {
 			return PRESET_BY_ID.get(paletteDraggedPresetId) ?? null;
 		}
@@ -404,7 +472,7 @@ export const LayoutCanvas = ({
 			(activeTool === "place" || activeTool === "road") &&
 			activePresetId &&
 			!isSpacePressed &&
-			!panSession
+			!isPanning
 		) {
 			return PRESET_BY_ID.get(activePresetId) ?? null;
 		}
@@ -413,18 +481,12 @@ export const LayoutCanvas = ({
 		activePresetId,
 		activeTool,
 		isPaletteDragOver,
+		isPanning,
 		isSpacePressed,
 		paletteDraggedPresetId,
-		panSession,
 	]);
 
-	const ghostRect = useMemo((): {
-		readonly x: number;
-		readonly y: number;
-		readonly width: number;
-		readonly height: number;
-		readonly valid: boolean;
-	} | null => {
+	const ghostRect = useMemo((): GhostPlacementRect | null => {
 		if (!effectiveGhostPreset || !cursorCell) {
 			return null;
 		}
@@ -439,8 +501,7 @@ export const LayoutCanvas = ({
 			height,
 		} = computeSnappedOrigin(cursorCell, effectiveGhostPreset, rotated);
 
-		let valid = canPlaceBuilding(
-			buildings,
+		let valid = spatialIndex.canPlace(
 			{ x: snappedX, y: snappedY, width, height },
 			gridWidth,
 			gridHeight
@@ -452,14 +513,7 @@ export const LayoutCanvas = ({
 			height === 1 &&
 			effectiveGhostPreset.isBorderless
 		) {
-			const overlapping = buildings.find((item) =>
-				rectanglesOverlap(item, {
-					x: snappedX,
-					y: snappedY,
-					width: 1,
-					height: 1,
-				})
-			);
+			const overlapping = spatialIndex.findBuildingAtTile(snappedX, snappedY);
 			const overlappingPreset = overlapping
 				? PRESET_BY_ID.get(overlapping.presetId)
 				: undefined;
@@ -475,7 +529,6 @@ export const LayoutCanvas = ({
 
 		return { x: snappedX, y: snappedY, width, height, valid };
 	}, [
-		buildings,
 		computeSnappedOrigin,
 		cursorCell,
 		effectiveGhostPreset,
@@ -484,85 +537,83 @@ export const LayoutCanvas = ({
 		isPaletteDragOver,
 		paletteDraggedPresetId,
 		placementRotated,
+		spatialIndex,
 	]);
 
 	const selectedIdSet = useMemo(
-		(): Set<string> => new Set(selectedIds),
+		(): ReadonlySet<string> =>
+			selectedIds.length > 0 ? new Set(selectedIds) : EMPTY_STRING_SET,
 		[selectedIds]
 	);
 
-	// Determine visible influence circles
-	const visibleInfluenceSources = useMemo((): Array<{
-		readonly key: string;
-		readonly rect: GridRect;
-		readonly radius: number;
-		readonly color: string;
-		readonly isPrimary: boolean;
-	}> => {
-		if (influenceMode === "none") {
-			return [];
-		}
-
-		const sources: Array<{
-			readonly key: string;
-			readonly rect: GridRect;
-			readonly radius: number;
-			readonly color: string;
-			readonly isPrimary: boolean;
-		}> = [];
-
-		for (const item of effectiveBuildings) {
-			const preset = PRESET_BY_ID.get(item.presetId);
-			if (!preset || preset.influenceRadius <= 0) {
-				continue;
+	// Determine visible influence circles using pre-indexed influenceBuildings
+	const visibleInfluenceSources =
+		useMemo((): ReadonlyArray<VisibleInfluenceSource> => {
+			if (influenceMode === "none") {
+				return EMPTY_INFLUENCE_SOURCES;
 			}
-			const isSelected = selectedIdSet.has(item.id);
-			const isHovered = hoveredBuildingId === item.id;
-			const isServiceBuilding =
-				preset.category === "public" ||
-				preset.category === "harbour" ||
-				preset.category === "ornament";
 
-			const shouldInclude =
-				influenceMode === "all" ||
-				(influenceMode === "services" &&
-					(isServiceBuilding || isSelected || isHovered)) ||
-				(influenceMode === "active" && (isSelected || isHovered));
+			const sources: Array<VisibleInfluenceSource> = [];
 
-			if (shouldInclude) {
+			for (const entry of spatialIndex.influenceBuildings) {
+				const item = entry.building;
+				const isSelected = selectedIdSet.has(item.id);
+				const isHovered = hoveredBuildingId === item.id;
+
+				const shouldInclude =
+					influenceMode === "all" ||
+					(influenceMode === "services" &&
+						(entry.isServiceBuilding || isSelected || isHovered)) ||
+					(influenceMode === "active" && (isSelected || isHovered));
+
+				if (shouldInclude) {
+					const isMovingItem =
+						isActivelyDraggingSelection && movingIdSet.has(item.id);
+					const effectiveRect: GridRect =
+						isMovingItem && dragMove
+							? {
+									x: item.x + dragMove.deltaX,
+									y: item.y + dragMove.deltaY,
+									width: item.width,
+									height: item.height,
+								}
+							: item;
+					sources.push({
+						key: item.id,
+						rect: effectiveRect,
+						radius: entry.radius,
+						color: item.customColor ?? entry.preset.cssColor,
+						isPrimary: isSelected || isHovered,
+					});
+				}
+			}
+
+			if (
+				ghostRect &&
+				effectiveGhostPreset &&
+				effectiveGhostPreset.influenceRadius > 0
+			) {
 				sources.push({
-					key: item.id,
-					rect: item,
-					radius: preset.influenceRadius,
-					color: item.customColor ?? preset.cssColor,
-					isPrimary: isSelected || isHovered,
+					key: "ghost_influence",
+					rect: ghostRect,
+					radius: effectiveGhostPreset.influenceRadius,
+					color: effectiveGhostPreset.cssColor,
+					isPrimary: true,
 				});
 			}
-		}
 
-		if (
-			ghostRect &&
-			effectiveGhostPreset &&
-			effectiveGhostPreset.influenceRadius > 0
-		) {
-			sources.push({
-				key: "ghost_influence",
-				rect: ghostRect,
-				radius: effectiveGhostPreset.influenceRadius,
-				color: effectiveGhostPreset.cssColor,
-				isPrimary: true,
-			});
-		}
-
-		return sources;
-	}, [
-		effectiveBuildings,
-		effectiveGhostPreset,
-		ghostRect,
-		hoveredBuildingId,
-		influenceMode,
-		selectedIdSet,
-	]);
+			return sources.length > 0 ? sources : EMPTY_INFLUENCE_SOURCES;
+		}, [
+			dragMove,
+			effectiveGhostPreset,
+			ghostRect,
+			hoveredBuildingId,
+			influenceMode,
+			isActivelyDraggingSelection,
+			movingIdSet,
+			selectedIdSet,
+			spatialIndex,
+		]);
 
 	// Primary source for highlighting covered buildings on the canvas
 	const primaryCoverageSource = useMemo((): {
@@ -576,24 +627,31 @@ export const LayoutCanvas = ({
 		) {
 			return { rect: ghostRect, radius: effectiveGhostPreset.influenceRadius };
 		}
-		if (selectedIds.length === 1) {
-			const selectedBuilding = effectiveBuildings.find(
-				(item) => item.id === selectedIds[0]
-			);
+		if (selectedIds.length === 1 && selectedIds[0]) {
+			const selectedBuilding = spatialIndex.buildingById.get(selectedIds[0]);
 			const preset = selectedBuilding
 				? PRESET_BY_ID.get(selectedBuilding.presetId)
 				: undefined;
 			if (selectedBuilding && preset && preset.influenceRadius > 0) {
+				const effectiveRect: GridRect =
+					isActivelyDraggingSelection &&
+					dragMove &&
+					movingIdSet.has(selectedBuilding.id)
+						? {
+								x: selectedBuilding.x + dragMove.deltaX,
+								y: selectedBuilding.y + dragMove.deltaY,
+								width: selectedBuilding.width,
+								height: selectedBuilding.height,
+							}
+						: selectedBuilding;
 				return {
-					rect: selectedBuilding,
+					rect: effectiveRect,
 					radius: preset.influenceRadius,
 				};
 			}
 		}
 		if (hoveredBuildingId && !effectiveGhostPreset) {
-			const hoveredBuilding = effectiveBuildings.find(
-				(item) => item.id === hoveredBuildingId
-			);
+			const hoveredBuilding = spatialIndex.buildingById.get(hoveredBuildingId);
 			const preset = hoveredBuilding
 				? PRESET_BY_ID.get(hoveredBuilding.presetId)
 				: undefined;
@@ -606,50 +664,67 @@ export const LayoutCanvas = ({
 		}
 		return null;
 	}, [
-		effectiveBuildings,
+		dragMove,
 		effectiveGhostPreset,
 		ghostRect,
 		hoveredBuildingId,
+		isActivelyDraggingSelection,
+		movingIdSet,
 		selectedIds,
+		spatialIndex,
 	]);
 
-	const coveredBuildingIds = useMemo((): Set<string> => {
-		const covered = new Set<string>();
+	const coveredBuildingIds = useMemo((): ReadonlySet<string> => {
 		if (!primaryCoverageSource || influenceMode === "none") {
-			return covered;
+			return EMPTY_STRING_SET;
 		}
-		for (const item of effectiveBuildings) {
-			const preset = PRESET_BY_ID.get(item.presetId);
-			if (!preset || preset.isRoad || preset.template === "Blocker") {
-				continue;
-			}
-			if (
-				isRectCoveredBySource(
-					item,
-					primaryCoverageSource.rect,
-					primaryCoverageSource.radius
-				)
-			) {
+		const sourceCenterX =
+			primaryCoverageSource.rect.x + primaryCoverageSource.rect.width * 0.5;
+		const sourceCenterY =
+			primaryCoverageSource.rect.y + primaryCoverageSource.rect.height * 0.5;
+		const threshold = primaryCoverageSource.radius + 1e-6;
+		const thresholdSquared = threshold * threshold;
+		const covered = new Set<string>();
+
+		for (const item of spatialIndex.coverableBuildings) {
+			const isMovingItem =
+				isActivelyDraggingSelection && movingIdSet.has(item.id);
+			const itemX =
+				isMovingItem && dragMove ? item.x + dragMove.deltaX : item.x;
+			const itemY =
+				isMovingItem && dragMove ? item.y + dragMove.deltaY : item.y;
+			const deltaX = itemX + item.width * 0.5 - sourceCenterX;
+			const deltaY = itemY + item.height * 0.5 - sourceCenterY;
+			if (deltaX * deltaX + deltaY * deltaY <= thresholdSquared) {
 				covered.add(item.id);
 			}
 		}
-		return covered;
-	}, [effectiveBuildings, influenceMode, primaryCoverageSource]);
 
-	const discreteCoverageSpans = useMemo(() => {
+		return covered.size > 0 ? covered : EMPTY_STRING_SET;
+	}, [
+		dragMove,
+		influenceMode,
+		isActivelyDraggingSelection,
+		movingIdSet,
+		primaryCoverageSource,
+		spatialIndex,
+	]);
+
+	const discreteCoverageSpans = useMemo((): ReadonlyArray<TileSpan> => {
 		if (
 			!showDiscreteTiles ||
 			!primaryCoverageSource ||
 			influenceMode === "none"
 		) {
-			return [];
+			return EMPTY_TILE_SPANS;
 		}
-		return computeCoveredTileSpans(
+		const spans = computeCoveredTileSpans(
 			primaryCoverageSource.rect,
 			primaryCoverageSource.radius,
 			gridWidth,
 			gridHeight
 		);
+		return spans.length > 0 ? spans : EMPTY_TILE_SPANS;
 	}, [
 		gridHeight,
 		gridWidth,
@@ -658,79 +733,70 @@ export const LayoutCanvas = ({
 		showDiscreteTiles,
 	]);
 
-	// Grid lines memoized cleanly
-	const gridLines = useMemo(() => {
-		if (!showGrid) {
-			return { minor: [], major: [] };
-		}
-		const minor: Array<{ key: string; points: Array<number> }> = [];
-		const major: Array<{ key: string; points: Array<number> }> = [];
-		const totalWidthPx = gridWidth * CELL_SIZE;
-		const totalHeightPx = gridHeight * CELL_SIZE;
-
-		for (let column = 0; column <= gridWidth; column += 1) {
-			const xPx = column * CELL_SIZE;
-			const entry = {
-				key: `v_${column}`,
-				points: [xPx, 0, xPx, totalHeightPx],
-			};
-			if (column % 5 === 0) {
-				major.push(entry);
-			} else {
-				minor.push(entry);
-			}
-		}
-		for (let row = 0; row <= gridHeight; row += 1) {
-			const yPx = row * CELL_SIZE;
-			const entry = {
-				key: `h_${row}`,
-				points: [0, yPx, totalWidthPx, yPx],
-			};
-			if (row % 5 === 0) {
-				major.push(entry);
-			} else {
-				minor.push(entry);
-			}
-		}
-		return { minor, major };
-	}, [gridHeight, gridWidth, showGrid]);
-
 	const screenToWorld = useCallback(
-		(stageX: number, stageY: number): { worldX: number; worldY: number } => ({
-			worldX: (stageX - viewport.x) / viewport.scale,
-			worldY: (stageY - viewport.y) / viewport.scale,
-		}),
-		[viewport.scale, viewport.x, viewport.y]
+		(stageX: number, stageY: number): { worldX: number; worldY: number } => {
+			const currentViewport = viewportRef.current;
+			return {
+				worldX: (stageX - currentViewport.x) / currentViewport.scale,
+				worldY: (stageY - currentViewport.y) / currentViewport.scale,
+			};
+		},
+		[]
 	);
 
+	const clearCursorCell = useCallback((): void => {
+		if (cursorCellRef.current !== null) {
+			cursorCellRef.current = null;
+			setCursorCell(null);
+		}
+	}, []);
+
 	const updateCursorFromStagePoint = useCallback(
-		(stageX: number, stageY: number): GridPoint => {
+		(
+			stageX: number,
+			stageY: number
+		): { readonly tile: GridPoint; readonly changed: boolean } => {
 			const { worldX, worldY } = screenToWorld(stageX, stageY);
 			const tileX = Math.floor(worldX / CELL_SIZE);
 			const tileY = Math.floor(worldY / CELL_SIZE);
-			setCursorCell((previous) =>
-				previous && previous.x === tileX && previous.y === tileY
-					? previous
-					: { x: tileX, y: tileY }
-			);
-			return { x: tileX, y: tileY };
+			const previous = cursorCellRef.current;
+			if (previous && previous.x === tileX && previous.y === tileY) {
+				return { tile: previous, changed: false };
+			}
+			const nextTile: GridPoint = { x: tileX, y: tileY };
+			cursorCellRef.current = nextTile;
+			setCursorCell(nextTile);
+			return { tile: nextTile, changed: true };
 		},
 		[screenToWorld]
 	);
 
 	const zoomAroundPoint = useCallback(
-		(targetScale: number, anchorStageX: number, anchorStageY: number): void => {
+		(
+			targetScale: number,
+			anchorStageX: number,
+			anchorStageY: number,
+			immediate = false
+		): void => {
+			const currentViewport = viewportRef.current;
 			const clampedScale = clampValue(targetScale, MIN_SCALE, MAX_SCALE);
-			const worldPointX = (anchorStageX - viewport.x) / viewport.scale;
-			const worldPointY = (anchorStageY - viewport.y) / viewport.scale;
+			const worldPointX =
+				(anchorStageX - currentViewport.x) / currentViewport.scale;
+			const worldPointY =
+				(anchorStageY - currentViewport.y) / currentViewport.scale;
 
-			setViewport({
+			const nextViewport: ViewportTransform = {
 				scale: Number(clampedScale.toFixed(3)),
 				x: Math.round(anchorStageX - worldPointX * clampedScale),
 				y: Math.round(anchorStageY - worldPointY * clampedScale),
-			});
+			};
+			if (immediate) {
+				applyViewportImmediate(nextViewport);
+			} else {
+				applyViewportSmooth(nextViewport);
+			}
 		},
-		[viewport.scale, viewport.x, viewport.y]
+		[applyViewportImmediate, applyViewportSmooth]
 	);
 
 	const handleWheel = useCallback(
@@ -742,32 +808,25 @@ export const LayoutCanvas = ({
 				return;
 			}
 			const zoomFactor = event.evt.deltaY < 0 ? 1.1 : 1 / 1.1;
-			zoomAroundPoint(viewport.scale * zoomFactor, pointer.x, pointer.y);
+			zoomAroundPoint(
+				viewportRef.current.scale * zoomFactor,
+				pointer.x,
+				pointer.y,
+				false
+			);
 		},
-		[viewport.scale, zoomAroundPoint]
+		[zoomAroundPoint]
 	);
 
 	const findBuildingAtTile = useCallback(
-		(tileX: number, tileY: number): PlacedBuilding | undefined => {
-			const cellRect = { x: tileX, y: tileY, width: 1, height: 1 };
-			for (let index = buildings.length - 1; index >= 0; index -= 1) {
-				const candidate = buildings[index];
-				if (candidate && rectanglesOverlap(candidate, cellRect)) {
-					return candidate;
-				}
-			}
-			return undefined;
-		},
-		[buildings]
+		(tileX: number, tileY: number): PlacedBuilding | undefined =>
+			spatialIndex.findBuildingAtTile(tileX, tileY),
+		[spatialIndex]
 	);
 
 	const readStageTouches = useCallback(
 		(touchList: TouchList): Array<StageTouchPoint> => {
-			const container = containerRef.current;
-			if (!container) {
-				return [];
-			}
-			const bounds = container.getBoundingClientRect();
+			const bounds = containerBoundsRef.current;
 			const points: Array<StageTouchPoint> = [];
 			for (let index = 0; index < touchList.length; index += 1) {
 				const touch = touchList.item(index);
@@ -784,6 +843,27 @@ export const LayoutCanvas = ({
 		},
 		[]
 	);
+
+	const beginPanSession = useCallback(
+		(clientX: number, clientY: number, button: number): void => {
+			const currentViewport = viewportRef.current;
+			panSessionRef.current = {
+				startClientX: clientX,
+				startClientY: clientY,
+				startViewportX: currentViewport.x,
+				startViewportY: currentViewport.y,
+				button,
+				movedDistance: 0,
+			};
+			setIsPanning(true);
+		},
+		[]
+	);
+
+	const endPanSession = useCallback((): void => {
+		panSessionRef.current = null;
+		setIsPanning(false);
+	}, []);
 
 	const handleStageMouseDown = useCallback(
 		(event: Konva.KonvaEventObject<MouseEvent>): void => {
@@ -804,14 +884,11 @@ export const LayoutCanvas = ({
 				isSpacePressed ||
 				activeTool === "pan"
 			) {
-				setPanSession({
-					startClientX: nativeEvent.clientX,
-					startClientY: nativeEvent.clientY,
-					startViewportX: viewport.x,
-					startViewportY: viewport.y,
-					button: nativeEvent.button,
-					movedDistance: 0,
-				});
+				beginPanSession(
+					nativeEvent.clientX,
+					nativeEvent.clientY,
+					nativeEvent.button
+				);
 				return;
 			}
 
@@ -819,7 +896,7 @@ export const LayoutCanvas = ({
 				return;
 			}
 
-			const tile = updateCursorFromStagePoint(pointer.x, pointer.y);
+			const { tile } = updateCursorFromStagePoint(pointer.x, pointer.y);
 			const { worldX, worldY } = screenToWorld(pointer.x, pointer.y);
 			const isAdditiveSelection = nativeEvent.shiftKey || isMultiSelectMode;
 
@@ -833,9 +910,12 @@ export const LayoutCanvas = ({
 			}
 
 			if (activeTool === "erase") {
-				recordStrokeSnapshot();
-				eraseAtCell(tile.x, tile.y, false);
-				paintStrokeRef.current = { mode: "erase", lastCell: tile };
+				const erased = eraseAtCell(tile.x, tile.y, true);
+				paintStrokeRef.current = {
+					mode: "erase",
+					lastCell: tile,
+					hasRecordedHistory: erased,
+				};
 				return;
 			}
 
@@ -845,11 +925,13 @@ export const LayoutCanvas = ({
 					: undefined;
 				if (preset) {
 					const snapped = computeSnappedOrigin(tile, preset, placementRotated);
-					recordStrokeSnapshot();
-					placeBuildingAt(snapped.x, snapped.y, { recordHistory: false });
+					const placedId = placeBuildingAt(snapped.x, snapped.y, {
+						recordHistory: true,
+					});
 					paintStrokeRef.current = {
 						mode: "place",
 						lastCell: { x: snapped.x, y: snapped.y },
+						hasRecordedHistory: placedId !== null,
 					};
 				}
 				return;
@@ -892,6 +974,7 @@ export const LayoutCanvas = ({
 		[
 			activePresetId,
 			activeTool,
+			beginPanSession,
 			computeSnappedOrigin,
 			eraseAtCell,
 			findBuildingAtTile,
@@ -899,15 +982,12 @@ export const LayoutCanvas = ({
 			isSpacePressed,
 			placeBuildingAt,
 			placementRotated,
-			recordStrokeSnapshot,
 			screenToWorld,
 			selectPreset,
 			selectedIdSet,
 			selectedIds,
 			setSelectedIds,
 			updateCursorFromStagePoint,
-			viewport.x,
-			viewport.y,
 		]
 	);
 
@@ -923,23 +1003,26 @@ export const LayoutCanvas = ({
 				return;
 			}
 
-			if (panSession) {
-				const deltaX = nativeEvent.clientX - panSession.startClientX;
-				const deltaY = nativeEvent.clientY - panSession.startClientY;
+			const activePan = panSessionRef.current;
+			if (activePan) {
+				const deltaX = nativeEvent.clientX - activePan.startClientX;
+				const deltaY = nativeEvent.clientY - activePan.startClientY;
 				const distance = Math.hypot(deltaX, deltaY);
-				setPanSession({
-					...panSession,
-					movedDistance: Math.max(panSession.movedDistance, distance),
+				if (distance > activePan.movedDistance) {
+					activePan.movedDistance = distance;
+				}
+				applyViewportSmooth({
+					scale: viewportRef.current.scale,
+					x: Math.round(activePan.startViewportX + deltaX),
+					y: Math.round(activePan.startViewportY + deltaY),
 				});
-				setViewport((current) => ({
-					...current,
-					x: Math.round(panSession.startViewportX + deltaX),
-					y: Math.round(panSession.startViewportY + deltaY),
-				}));
 				return;
 			}
 
-			const tile = updateCursorFromStagePoint(pointer.x, pointer.y);
+			const { tile, changed: tileChanged } = updateCursorFromStagePoint(
+				pointer.x,
+				pointer.y
+			);
 			const { worldX, worldY } = screenToWorld(pointer.x, pointer.y);
 
 			if (dragMove) {
@@ -972,15 +1055,26 @@ export const LayoutCanvas = ({
 			const activeStroke = paintStrokeRef.current;
 			if (activeStroke) {
 				if (activeStroke.mode === "erase") {
-					const cells = computeLineCells(
-						activeStroke.lastCell,
-						tile,
-						nativeEvent.shiftKey
-					);
-					for (const point of cells) {
-						eraseAtCell(point.x, point.y, false);
+					if (
+						tile.x !== activeStroke.lastCell.x ||
+						tile.y !== activeStroke.lastCell.y
+					) {
+						const cells = computeLineCells(
+							activeStroke.lastCell,
+							tile,
+							nativeEvent.shiftKey
+						);
+						const removedCount = eraseAtCells(
+							cells,
+							!activeStroke.hasRecordedHistory
+						);
+						paintStrokeRef.current = {
+							mode: "erase",
+							lastCell: tile,
+							hasRecordedHistory:
+								activeStroke.hasRecordedHistory || removedCount > 0,
+						};
 					}
-					paintStrokeRef.current = { mode: "erase", lastCell: tile };
 					return;
 				}
 
@@ -1000,32 +1094,44 @@ export const LayoutCanvas = ({
 							targetOrigin,
 							nativeEvent.shiftKey
 						);
-						for (const point of pathCells) {
-							placeBuildingAt(point.x, point.y, { recordHistory: false });
-						}
-						paintStrokeRef.current = { mode: "place", lastCell: targetOrigin };
+						const placedCount = placeBuildingsAtPoints(pathCells, {
+							recordHistory: !activeStroke.hasRecordedHistory,
+						});
+						paintStrokeRef.current = {
+							mode: "place",
+							lastCell: targetOrigin,
+							hasRecordedHistory:
+								activeStroke.hasRecordedHistory || placedCount > 0,
+						};
 					}
 				}
 				return;
 			}
 
-			// Hover detection in select mode
-			const hovered = findBuildingAtTile(tile.x, tile.y);
-			const nextHoveredId = hovered?.id ?? null;
-			if (nextHoveredId !== hoveredBuildingId) {
-				setHoveredBuildingId(nextHoveredId);
+			// Hover detection only when not showing a placement ghost & only when cursor tile changed
+			if (effectiveGhostPreset || activeTool === "pan") {
+				if (hoveredBuildingId !== null) {
+					setHoveredBuildingId(null);
+				}
+				return;
+			}
+
+			if (tileChanged) {
+				const hovered = findBuildingAtTile(tile.x, tile.y);
+				setHoveredBuildingId(hovered?.id ?? null);
 			}
 		},
 		[
+			activeTool,
+			applyViewportSmooth,
 			computeSnappedOrigin,
 			dragMove,
 			effectiveGhostPreset,
-			eraseAtCell,
+			eraseAtCells,
 			findBuildingAtTile,
 			hoveredBuildingId,
 			marquee,
-			panSession,
-			placeBuildingAt,
+			placeBuildingsAtPoints,
 			placementRotated,
 			screenToWorld,
 			setHoveredBuildingId,
@@ -1035,14 +1141,11 @@ export const LayoutCanvas = ({
 
 	const finalizePointerInteraction = useCallback(
 		(pointer?: { x: number; y: number } | null): void => {
-			if (panSession) {
+			const activePan = panSessionRef.current;
+			if (activePan) {
 				// Quick right-click (< 5px movement) erases tile under cursor or cancels placement
-				if (
-					panSession.button === 2 &&
-					panSession.movedDistance < 5 &&
-					pointer
-				) {
-					const tile = updateCursorFromStagePoint(pointer.x, pointer.y);
+				if (activePan.button === 2 && activePan.movedDistance < 5 && pointer) {
+					const { tile } = updateCursorFromStagePoint(pointer.x, pointer.y);
 					const hit = findBuildingAtTile(tile.x, tile.y);
 					if (hit) {
 						eraseAtCell(tile.x, tile.y, true);
@@ -1050,12 +1153,13 @@ export const LayoutCanvas = ({
 						cancelActiveAction();
 					}
 				} else if (
-					panSession.button === TOUCH_PAN_EMPTY_BUTTON &&
-					panSession.movedDistance < 6
+					activePan.button === TOUCH_PAN_EMPTY_BUTTON &&
+					activePan.movedDistance < 6
 				) {
 					setSelectedIds([], false);
 				}
-				setPanSession(null);
+				endPanSession();
+				applyViewportImmediate(viewportRef.current);
 			}
 
 			if (dragMove) {
@@ -1086,7 +1190,7 @@ export const LayoutCanvas = ({
 						height: (maxWorldY - minWorldY) / CELL_SIZE,
 					};
 					const matchedIds = buildings
-						.filter((item) => rectanglesOverlap(item, selectionBox))
+						.filter((item) => rectanglesOverlapFast(item, selectionBox))
 						.map((item) => item.id);
 					setSelectedIds(matchedIds, marquee.additive);
 				}
@@ -1096,14 +1200,15 @@ export const LayoutCanvas = ({
 			paintStrokeRef.current = null;
 		},
 		[
+			applyViewportImmediate,
 			buildings,
 			cancelActiveAction,
 			dragMove,
+			endPanSession,
 			eraseAtCell,
 			findBuildingAtTile,
 			marquee,
 			moveBuildingsByDelta,
-			panSession,
 			setSelectedIds,
 			updateCursorFromStagePoint,
 		]
@@ -1129,9 +1234,10 @@ export const LayoutCanvas = ({
 			touchPlacePreviewRef.current = null;
 			setDragMove(null);
 			setMarquee(null);
-			setPanSession(null);
-			setCursorCell(null);
+			endPanSession();
+			clearCursorCell();
 
+			const currentViewport = viewportRef.current;
 			const midpointX = (firstTouch.stageX + secondTouch.stageX) / 2;
 			const midpointY = (firstTouch.stageY + secondTouch.stageY) / 2;
 			const initialDistance = Math.max(
@@ -1144,12 +1250,12 @@ export const LayoutCanvas = ({
 
 			pinchSessionRef.current = {
 				initialDistance,
-				initialScale: viewport.scale,
-				anchorWorldX: (midpointX - viewport.x) / viewport.scale,
-				anchorWorldY: (midpointY - viewport.y) / viewport.scale,
+				initialScale: currentViewport.scale,
+				anchorWorldX: (midpointX - currentViewport.x) / currentViewport.scale,
+				anchorWorldY: (midpointY - currentViewport.y) / currentViewport.scale,
 			};
 		},
-		[viewport.scale, viewport.x, viewport.y]
+		[clearCursorCell, endPanSession]
 	);
 
 	const handleStageTouchStart = useCallback(
@@ -1160,6 +1266,7 @@ export const LayoutCanvas = ({
 				nativeEvent.preventDefault();
 			}
 
+			syncContainerBounds();
 			const touches = readStageTouches(nativeEvent.touches);
 			if (touches.length >= 2 && touches[0] && touches[1]) {
 				startPinchZoom(touches[0], touches[1]);
@@ -1175,18 +1282,11 @@ export const LayoutCanvas = ({
 			const touchPoint = touches[0];
 
 			if (activeTool === "pan" || isSpacePressed) {
-				setPanSession({
-					startClientX: touchPoint.clientX,
-					startClientY: touchPoint.clientY,
-					startViewportX: viewport.x,
-					startViewportY: viewport.y,
-					button: 0,
-					movedDistance: 0,
-				});
+				beginPanSession(touchPoint.clientX, touchPoint.clientY, 0);
 				return;
 			}
 
-			const tile = updateCursorFromStagePoint(
+			const { tile } = updateCursorFromStagePoint(
 				touchPoint.stageX,
 				touchPoint.stageY
 			);
@@ -1200,7 +1300,7 @@ export const LayoutCanvas = ({
 				if (picked) {
 					selectPreset(picked.presetId, picked.rotated);
 				}
-				setCursorCell(null);
+				clearCursorCell();
 				return;
 			}
 
@@ -1268,19 +1368,18 @@ export const LayoutCanvas = ({
 				});
 			} else {
 				// 1-finger drag on empty canvas pans smoothly; tap deselects
-				setPanSession({
-					startClientX: touchPoint.clientX,
-					startClientY: touchPoint.clientY,
-					startViewportX: viewport.x,
-					startViewportY: viewport.y,
-					button: TOUCH_PAN_EMPTY_BUTTON,
-					movedDistance: 0,
-				});
+				beginPanSession(
+					touchPoint.clientX,
+					touchPoint.clientY,
+					TOUCH_PAN_EMPTY_BUTTON
+				);
 			}
 		},
 		[
 			activePresetId,
 			activeTool,
+			beginPanSession,
+			clearCursorCell,
 			findBuildingAtTile,
 			isMultiSelectMode,
 			isSpacePressed,
@@ -1291,9 +1390,8 @@ export const LayoutCanvas = ({
 			selectedIds,
 			setSelectedIds,
 			startPinchZoom,
+			syncContainerBounds,
 			updateCursorFromStagePoint,
-			viewport.x,
-			viewport.y,
 		]
 	);
 
@@ -1326,7 +1424,7 @@ export const LayoutCanvas = ({
 					MIN_SCALE,
 					MAX_SCALE
 				);
-				setViewport({
+				applyViewportSmooth({
 					scale: Number(nextScale.toFixed(3)),
 					x: Math.round(midpointX - session.anchorWorldX * nextScale),
 					y: Math.round(midpointY - session.anchorWorldY * nextScale),
@@ -1344,23 +1442,23 @@ export const LayoutCanvas = ({
 
 			const touchPoint = touches[0];
 
-			if (panSession) {
-				const deltaX = touchPoint.clientX - panSession.startClientX;
-				const deltaY = touchPoint.clientY - panSession.startClientY;
+			const activePan = panSessionRef.current;
+			if (activePan) {
+				const deltaX = touchPoint.clientX - activePan.startClientX;
+				const deltaY = touchPoint.clientY - activePan.startClientY;
 				const distance = Math.hypot(deltaX, deltaY);
-				setPanSession({
-					...panSession,
-					movedDistance: Math.max(panSession.movedDistance, distance),
+				if (distance > activePan.movedDistance) {
+					activePan.movedDistance = distance;
+				}
+				applyViewportSmooth({
+					scale: viewportRef.current.scale,
+					x: Math.round(activePan.startViewportX + deltaX),
+					y: Math.round(activePan.startViewportY + deltaY),
 				});
-				setViewport((current) => ({
-					...current,
-					x: Math.round(panSession.startViewportX + deltaX),
-					y: Math.round(panSession.startViewportY + deltaY),
-				}));
 				return;
 			}
 
-			const tile = updateCursorFromStagePoint(
+			const { tile } = updateCursorFromStagePoint(
 				touchPoint.stageX,
 				touchPoint.stageY
 			);
@@ -1386,17 +1484,18 @@ export const LayoutCanvas = ({
 					tile.y !== pendingStroke.startTile.y
 				) {
 					pendingTouchStrokeRef.current = null;
-					recordStrokeSnapshot();
 					if (pendingStroke.mode === "erase") {
 						const initialCells = computeLineCells(
 							pendingStroke.startTile,
 							tile,
 							false
 						);
-						for (const point of initialCells) {
-							eraseAtCell(point.x, point.y, false);
-						}
-						paintStrokeRef.current = { mode: "erase", lastCell: tile };
+						const removedCount = eraseAtCells(initialCells, true);
+						paintStrokeRef.current = {
+							mode: "erase",
+							lastCell: tile,
+							hasRecordedHistory: removedCount > 0,
+						};
 					} else if (effectiveGhostPreset) {
 						const startSnapped = computeSnappedOrigin(
 							pendingStroke.startTile,
@@ -1413,12 +1512,13 @@ export const LayoutCanvas = ({
 							{ x: currentSnapped.x, y: currentSnapped.y },
 							false
 						);
-						for (const point of initialCells) {
-							placeBuildingAt(point.x, point.y, { recordHistory: false });
-						}
+						const placedCount = placeBuildingsAtPoints(initialCells, {
+							recordHistory: true,
+						});
 						paintStrokeRef.current = {
 							mode: "place",
 							lastCell: { x: currentSnapped.x, y: currentSnapped.y },
+							hasRecordedHistory: placedCount > 0,
 						};
 					}
 				}
@@ -1428,11 +1528,22 @@ export const LayoutCanvas = ({
 			const activeStroke = paintStrokeRef.current;
 			if (activeStroke) {
 				if (activeStroke.mode === "erase") {
-					const cells = computeLineCells(activeStroke.lastCell, tile, false);
-					for (const point of cells) {
-						eraseAtCell(point.x, point.y, false);
+					if (
+						tile.x !== activeStroke.lastCell.x ||
+						tile.y !== activeStroke.lastCell.y
+					) {
+						const cells = computeLineCells(activeStroke.lastCell, tile, false);
+						const removedCount = eraseAtCells(
+							cells,
+							!activeStroke.hasRecordedHistory
+						);
+						paintStrokeRef.current = {
+							mode: "erase",
+							lastCell: tile,
+							hasRecordedHistory:
+								activeStroke.hasRecordedHistory || removedCount > 0,
+						};
 					}
-					paintStrokeRef.current = { mode: "erase", lastCell: tile };
 					return;
 				}
 				if (activeStroke.mode === "place" && effectiveGhostPreset) {
@@ -1451,10 +1562,15 @@ export const LayoutCanvas = ({
 							targetOrigin,
 							false
 						);
-						for (const point of pathCells) {
-							placeBuildingAt(point.x, point.y, { recordHistory: false });
-						}
-						paintStrokeRef.current = { mode: "place", lastCell: targetOrigin };
+						const placedCount = placeBuildingsAtPoints(pathCells, {
+							recordHistory: !activeStroke.hasRecordedHistory,
+						});
+						paintStrokeRef.current = {
+							mode: "place",
+							lastCell: targetOrigin,
+							hasRecordedHistory:
+								activeStroke.hasRecordedHistory || placedCount > 0,
+						};
 					}
 				}
 				return;
@@ -1487,16 +1603,15 @@ export const LayoutCanvas = ({
 			}
 		},
 		[
+			applyViewportSmooth,
 			computeSnappedOrigin,
 			dragMove,
 			effectiveGhostPreset,
-			eraseAtCell,
+			eraseAtCells,
 			marquee,
-			panSession,
-			placeBuildingAt,
+			placeBuildingsAtPoints,
 			placementRotated,
 			readStageTouches,
-			recordStrokeSnapshot,
 			screenToWorld,
 			startPinchZoom,
 			updateCursorFromStagePoint,
@@ -1519,6 +1634,7 @@ export const LayoutCanvas = ({
 			pinchSessionRef.current = null;
 			if (wasMultiTouchGestureRef.current) {
 				wasMultiTouchGestureRef.current = false;
+				applyViewportImmediate(viewportRef.current);
 				return;
 			}
 
@@ -1542,7 +1658,7 @@ export const LayoutCanvas = ({
 						placeBuildingAt(snapped.x, snapped.y, { recordHistory: true });
 					}
 				}
-				setCursorCell(null);
+				clearCursorCell();
 				return;
 			}
 
@@ -1560,15 +1676,17 @@ export const LayoutCanvas = ({
 					);
 					placeBuildingAt(snapped.x, snapped.y, { recordHistory: true });
 				}
-				setCursorCell(null);
+				clearCursorCell();
 				return;
 			}
 
 			finalizePointerInteraction(null);
-			setCursorCell(null);
+			clearCursorCell();
 		},
 		[
 			activePresetId,
+			applyViewportImmediate,
+			clearCursorCell,
 			computeSnappedOrigin,
 			eraseAtCell,
 			finalizePointerInteraction,
@@ -1583,19 +1701,16 @@ export const LayoutCanvas = ({
 			event.preventDefault();
 			event.dataTransfer.dropEffect = "copy";
 			if (!isPaletteDragOver) {
+				syncContainerBounds();
 				setIsPaletteDragOver(true);
 			}
-			const container = containerRef.current;
-			if (!container) {
-				return;
-			}
-			const bounds = container.getBoundingClientRect();
+			const bounds = containerBoundsRef.current;
 			updateCursorFromStagePoint(
 				event.clientX - bounds.left,
 				event.clientY - bounds.top
 			);
 		},
-		[isPaletteDragOver, updateCursorFromStagePoint]
+		[isPaletteDragOver, syncContainerBounds, updateCursorFromStagePoint]
 	);
 
 	const handleHtmlDragLeave = useCallback(
@@ -1622,8 +1737,7 @@ export const LayoutCanvas = ({
 				paletteDraggedPresetId;
 			onClearPaletteDrag();
 
-			const container = containerRef.current;
-			if (!container || !presetId) {
+			if (!presetId) {
 				return;
 			}
 			const preset = PRESET_BY_ID.get(presetId);
@@ -1631,8 +1745,9 @@ export const LayoutCanvas = ({
 				return;
 			}
 
-			const bounds = container.getBoundingClientRect();
-			const tile = updateCursorFromStagePoint(
+			syncContainerBounds();
+			const bounds = containerBoundsRef.current;
+			const { tile } = updateCursorFromStagePoint(
 				event.clientX - bounds.left,
 				event.clientY - bounds.top
 			);
@@ -1654,25 +1769,16 @@ export const LayoutCanvas = ({
 			paletteDraggedPresetId,
 			placeBuildingAt,
 			setSelectedIds,
+			syncContainerBounds,
 			updateCursorFromStagePoint,
 		]
 	);
 
 	const isDark = canvasTheme === "dark";
-	const boardBackground = isDark ? "#181c24" : "#f2ead7";
-	const minorGridStroke = isDark
-		? "rgba(148, 163, 184, 0.10)"
-		: "rgba(120, 98, 66, 0.14)";
-	const majorGridStroke = isDark
-		? "rgba(212, 168, 83, 0.22)"
-		: "rgba(120, 98, 66, 0.30)";
-	const boardBorderStroke = isDark
-		? "rgba(212, 168, 83, 0.45)"
-		: "rgba(120, 88, 42, 0.55)";
 
 	const cursorStyle = useMemo((): string => {
-		if (panSession || isSpacePressed || activeTool === "pan") {
-			return panSession ? "grabbing" : "grab";
+		if (isPanning || isSpacePressed || activeTool === "pan") {
+			return isPanning ? "grabbing" : "grab";
 		}
 		if (activeTool === "erase") {
 			return "not-allowed";
@@ -1687,7 +1793,7 @@ export const LayoutCanvas = ({
 			return "grabbing";
 		}
 		return "default";
-	}, [activeTool, dragMove?.hasMoved, isSpacePressed, panSession]);
+	}, [activeTool, dragMove?.hasMoved, isPanning, isSpacePressed]);
 
 	return (
 		<main
@@ -1723,349 +1829,54 @@ export const LayoutCanvas = ({
 				onTouchStart={handleStageTouchStart}
 				onWheel={handleWheel}
 				onMouseLeave={(): void => {
-					setCursorCell(null);
+					clearCursorCell();
 					setHoveredBuildingId(null);
 					if (paintStrokeRef.current) {
 						paintStrokeRef.current = null;
 					}
 				}}
 			>
-				{/* Layer 1: Island Drafting Surface & Grid */}
-				<Layer listening={false}>
-					<Rect
-						fill={boardBackground}
-						height={gridHeight * CELL_SIZE}
-						stroke={boardBorderStroke}
-						strokeWidth={2}
-						width={gridWidth * CELL_SIZE}
-						x={0}
-						y={0}
-					/>
-					{gridLines.minor.map((line) => (
-						<Line
-							key={line.key}
-							points={line.points}
-							stroke={minorGridStroke}
-							strokeWidth={1}
-						/>
-					))}
-					{gridLines.major.map((line) => (
-						<Line
-							key={line.key}
-							points={line.points}
-							stroke={majorGridStroke}
-							strokeWidth={1.25}
-						/>
-					))}
-				</Layer>
+				{/* Layer 1: Island Drafting Surface & Batched Viewport-Culled Grid */}
+				<GridLayer
+					canvasTheme={canvasTheme}
+					gridHeight={gridHeight}
+					gridWidth={gridWidth}
+					showGrid={showGrid}
+				/>
 
 				{/* Layer 2: Influence Circles & Discrete Euclidean Tile Spans */}
-				<Layer listening={false}>
-					{discreteCoverageSpans.map((span) => (
-						<Rect
-							key={`span_${span.y}_${span.xStart}`}
-							fill="rgba(52, 211, 153, 0.14)"
-							height={CELL_SIZE}
-							stroke="rgba(52, 211, 153, 0.25)"
-							strokeWidth={0.75}
-							width={span.width * CELL_SIZE}
-							x={span.xStart * CELL_SIZE}
-							y={span.y * CELL_SIZE}
-						/>
-					))}
+				<InfluenceLayer
+					discreteCoverageSpans={discreteCoverageSpans}
+					visibleInfluenceSources={visibleInfluenceSources}
+				/>
 
-					{visibleInfluenceSources.map((source) => {
-						const center = getRectCenter(source.rect);
-						return (
-							<Circle
-								key={source.key}
-								dash={source.isPrimary ? [8, 5] : [5, 6]}
-								radius={source.radius * CELL_SIZE}
-								strokeWidth={source.isPrimary ? 2 : 1.25}
-								x={center.x * CELL_SIZE}
-								y={center.y * CELL_SIZE}
-								fill={
-									source.isPrimary
-										? "rgba(251, 191, 36, 0.11)"
-										: "rgba(56, 189, 248, 0.05)"
-								}
-								stroke={
-									source.isPrimary
-										? "rgba(251, 191, 36, 0.85)"
-										: "rgba(125, 211, 252, 0.45)"
-								}
-							/>
-						);
-					})}
-				</Layer>
+				{/* Layer 3: Stationary Placed Roads & Buildings (zero redraws on cursor/hover/selection!) */}
+				<BuildingsLayer
+					buildings={buildings}
+					hiddenBuildingIds={hiddenBuildingIds}
+					imageCacheVersion={imageCacheVersion}
+					showIcons={showIcons}
+					showLabels={showLabels}
+					spatialIndex={spatialIndex}
+				/>
 
-				{/* Layer 3: Placed Roads & Buildings */}
-				<Layer listening={false}>
-					{effectiveBuildings.map((building) => {
-						const preset = PRESET_BY_ID.get(building.presetId);
-						const xPx = building.x * CELL_SIZE;
-						const yPx = building.y * CELL_SIZE;
-						const widthPx = building.width * CELL_SIZE;
-						const heightPx = building.height * CELL_SIZE;
-						const fill =
-							building.customColor ??
-							preset?.cssColor ??
-							"rgba(148, 163, 184, 1)";
-						const isSelected = selectedIdSet.has(building.id);
-						const isHovered = hoveredBuildingId === building.id;
-						const isMoving = movingIdSet.has(building.id);
-						const isCovered = coveredBuildingIds.has(building.id);
-
-						// Seamless borderless road rendering
-						if (
-							preset?.isRoad &&
-							building.width === 1 &&
-							building.height === 1
-						) {
-							const hasNorth = roadTileKeys.has(
-								toTileKey(building.x, building.y - 1)
-							);
-							const hasSouth = roadTileKeys.has(
-								toTileKey(building.x, building.y + 1)
-							);
-							const hasWest = roadTileKeys.has(
-								toTileKey(building.x - 1, building.y)
-							);
-							const hasEast = roadTileKeys.has(
-								toTileKey(building.x + 1, building.y)
-							);
-							const edgeColor = "rgba(15, 23, 42, 0.45)";
-
-							return (
-								<Group key={building.id} x={xPx} y={yPx}>
-									<Rect
-										fill={fill}
-										height={CELL_SIZE}
-										opacity={isMoving ? 0.8 : 0.94}
-										width={CELL_SIZE}
-									/>
-									{!hasNorth && (
-										<Line
-											points={[0, 0.5, CELL_SIZE, 0.5]}
-											stroke={edgeColor}
-											strokeWidth={1}
-										/>
-									)}
-									{!hasSouth && (
-										<Line
-											points={[0, CELL_SIZE - 0.5, CELL_SIZE, CELL_SIZE - 0.5]}
-											stroke={edgeColor}
-											strokeWidth={1}
-										/>
-									)}
-									{!hasWest && (
-										<Line
-											points={[0.5, 0, 0.5, CELL_SIZE]}
-											stroke={edgeColor}
-											strokeWidth={1}
-										/>
-									)}
-									{!hasEast && (
-										<Line
-											points={[CELL_SIZE - 0.5, 0, CELL_SIZE - 0.5, CELL_SIZE]}
-											stroke={edgeColor}
-											strokeWidth={1}
-										/>
-									)}
-									{isSelected && (
-										<Rect
-											height={CELL_SIZE - 2}
-											stroke={isDragMoveValid ? "#fbbf24" : "#ef4444"}
-											strokeWidth={2}
-											width={CELL_SIZE - 2}
-											x={1}
-											y={1}
-										/>
-									)}
-								</Group>
-							);
-						}
-
-						const iconImage = showIcons
-							? getCachedImage(preset?.iconUrl)
-							: undefined;
-						const minSidePx = Math.min(widthPx, heightPx);
-						const iconSize = clampValue(minSidePx * 0.56, 18, 52);
-						const displayLabel =
-							building.customLabel ?? preset?.name ?? building.presetId;
-						const canShowText =
-							showLabels &&
-							viewport.scale >= 0.55 &&
-							widthPx >= 2 * CELL_SIZE &&
-							heightPx >= 2 * CELL_SIZE;
-
-						let borderStroke = "rgba(15, 23, 42, 0.78)";
-						let borderWidth = 1.5;
-						if (isMoving && !isDragMoveValid) {
-							borderStroke = "#ef4444";
-							borderWidth = 3;
-						} else if (isSelected) {
-							borderStroke = "#fbbf24";
-							borderWidth = 2.75;
-						} else if (isHovered) {
-							borderStroke = "#f8fafc";
-							borderWidth = 2;
-						} else if (isCovered) {
-							borderStroke = "#10b981";
-							borderWidth = 2.25;
-						}
-
-						return (
-							<Group key={building.id} x={xPx} y={yPx}>
-								<Rect
-									cornerRadius={preset?.isBorderless ? 0 : 3}
-									fill={fill}
-									height={heightPx}
-									opacity={isMoving ? 0.82 : 0.92}
-									stroke={borderStroke}
-									strokeWidth={borderWidth}
-									width={widthPx}
-								/>
-								{!preset?.isBorderless && (
-									<Rect
-										cornerRadius={2}
-										height={Math.max(0, heightPx - 4)}
-										stroke="rgba(255, 255, 255, 0.22)"
-										strokeWidth={1}
-										width={Math.max(0, widthPx - 4)}
-										x={2}
-										y={2}
-									/>
-								)}
-								{isCovered && !isSelected && (
-									<Circle
-										fill="#10b981"
-										radius={4.5}
-										stroke="#052e16"
-										strokeWidth={1}
-										x={widthPx - 8}
-										y={8}
-									/>
-								)}
-								{iconImage && (
-									<KonvaImage
-										height={iconSize}
-										image={iconImage}
-										width={iconSize}
-										x={(widthPx - iconSize) / 2}
-										y={
-											canShowText
-												? Math.max(4, (heightPx - iconSize) / 2 - 7)
-												: (heightPx - iconSize) / 2
-										}
-									/>
-								)}
-								{canShowText && (
-									<Text
-										ellipsis
-										align="center"
-										fill="#0f172a"
-										fontFamily="ui-sans-serif, system-ui, sans-serif"
-										fontSize={10}
-										fontStyle="bold"
-										height={14}
-										padding={2}
-										text={displayLabel}
-										width={widthPx - 4}
-										wrap="none"
-										x={2}
-										y={heightPx - 16}
-									/>
-								)}
-							</Group>
-						);
-					})}
-				</Layer>
-
-				{/* Layer 4: Live Placement Ghost & Marquee Box */}
-				<Layer listening={false}>
-					{ghostRect && effectiveGhostPreset && (
-						<Group x={ghostRect.x * CELL_SIZE} y={ghostRect.y * CELL_SIZE}>
-							<Rect
-								cornerRadius={3}
-								height={ghostRect.height * CELL_SIZE}
-								opacity={0.72}
-								stroke={ghostRect.valid ? "#34d399" : "#ef4444"}
-								strokeWidth={2.5}
-								width={ghostRect.width * CELL_SIZE}
-								fill={
-									ghostRect.valid
-										? effectiveGhostPreset.cssColor
-										: "rgba(239, 68, 68, 0.45)"
-								}
-							/>
-							{showIcons && getCachedImage(effectiveGhostPreset.iconUrl) && (
-								<KonvaImage
-									image={getCachedImage(effectiveGhostPreset.iconUrl)}
-									opacity={0.9}
-									height={Math.min(
-										44,
-										Math.min(ghostRect.width, ghostRect.height) *
-											CELL_SIZE *
-											0.58
-									)}
-									width={Math.min(
-										44,
-										Math.min(ghostRect.width, ghostRect.height) *
-											CELL_SIZE *
-											0.58
-									)}
-									x={
-										(ghostRect.width * CELL_SIZE -
-											Math.min(
-												44,
-												Math.min(ghostRect.width, ghostRect.height) *
-													CELL_SIZE *
-													0.58
-											)) /
-										2
-									}
-									y={
-										(ghostRect.height * CELL_SIZE -
-											Math.min(
-												44,
-												Math.min(ghostRect.width, ghostRect.height) *
-													CELL_SIZE *
-													0.58
-											)) /
-										2
-									}
-								/>
-							)}
-							{ghostRect.width >= 2 && (
-								<Text
-									align="center"
-									fill={ghostRect.valid ? "#ecfdf5" : "#fef2f2"}
-									fontFamily="ui-monospace, monospace"
-									fontSize={10}
-									fontStyle="bold"
-									text={`${ghostRect.width}×${ghostRect.height}`}
-									width={ghostRect.width * CELL_SIZE}
-									x={0}
-									y={-15}
-								/>
-							)}
-						</Group>
-					)}
-
-					{marquee && (
-						<Rect
-							dash={[5, 4]}
-							fill="rgba(251, 191, 36, 0.14)"
-							height={Math.abs(marquee.currentWorldY - marquee.startWorldY)}
-							stroke="#fbbf24"
-							strokeWidth={1.5 / viewport.scale}
-							width={Math.abs(marquee.currentWorldX - marquee.startWorldX)}
-							x={Math.min(marquee.startWorldX, marquee.currentWorldX)}
-							y={Math.min(marquee.startWorldY, marquee.currentWorldY)}
-						/>
-					)}
-				</Layer>
+				{/* Layer 4: Dynamic Overlays (Coverage, Hover, Selection, Drag-Move, Ghost & Marquee) */}
+				<DynamicOverlayLayer
+					coveredBuildingIds={coveredBuildingIds}
+					dragMove={dragMove}
+					ghostPreset={effectiveGhostPreset}
+					ghostRect={ghostRect}
+					hoveredBuildingId={hoveredBuildingId}
+					imageCacheVersion={imageCacheVersion}
+					isDragMoveValid={isDragMoveValid}
+					marquee={marquee}
+					movingIdSet={movingIdSet}
+					selectedIdSet={selectedIdSet}
+					selectedIds={selectedIds}
+					showIcons={showIcons}
+					showLabels={showLabels}
+					spatialIndex={spatialIndex}
+				/>
 			</Stage>
 
 			{/* Bottom Canvas HUD Bar */}
@@ -2077,9 +1888,10 @@ export const LayoutCanvas = ({
 						type="button"
 						onClick={(): void => {
 							zoomAroundPoint(
-								viewport.scale / 1.2,
+								viewportRef.current.scale / 1.2,
 								stageSize.width / 2,
-								stageSize.height / 2
+								stageSize.height / 2,
+								true
 							);
 						}}
 					>
@@ -2090,7 +1902,12 @@ export const LayoutCanvas = ({
 						className="anno-touch-target inline-flex min-w-11 items-center justify-center rounded px-1 py-0.5 text-center font-mono text-amber-300 hover:bg-stone-800 active:bg-stone-800 sm:min-w-12 sm:px-1.5"
 						type="button"
 						onClick={(): void => {
-							zoomAroundPoint(1, stageSize.width / 2, stageSize.height / 2);
+							zoomAroundPoint(
+								1,
+								stageSize.width / 2,
+								stageSize.height / 2,
+								true
+							);
 						}}
 					>
 						{Math.round(viewport.scale * 100)}%
@@ -2101,9 +1918,10 @@ export const LayoutCanvas = ({
 						type="button"
 						onClick={(): void => {
 							zoomAroundPoint(
-								viewport.scale * 1.2,
+								viewportRef.current.scale * 1.2,
 								stageSize.width / 2,
-								stageSize.height / 2
+								stageSize.height / 2,
+								true
 							);
 						}}
 					>

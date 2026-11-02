@@ -220,7 +220,7 @@ export const BuildingPalette = ({
 							<details
 								key={group.groupKey}
 								open
-								className="group rounded-lg border border-stone-800/90 bg-stone-900/50"
+								className="anno-palette-group group rounded-lg border border-stone-800/90 bg-stone-900/50"
 							>
 								<summary className="flex cursor-pointer list-none items-center justify-between px-2.5 py-2 text-xs font-semibold text-stone-200 select-none hover:text-amber-300 lg:py-1.5">
 									<span className="flex items-center gap-1.5">

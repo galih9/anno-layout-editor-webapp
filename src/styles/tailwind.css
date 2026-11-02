@@ -60,14 +60,28 @@ dialog::backdrop {
 
 .anno-workbench-shell > aside:first-of-type {
 	grid-area: palette;
+	contain: layout style paint;
 }
 
 .anno-workbench-shell > main {
 	grid-area: canvas;
+	contain: layout style paint;
 }
 
 .anno-workbench-shell > aside:last-of-type {
 	grid-area: inspector;
+	contain: layout style paint;
+}
+
+.anno-palette-group {
+	content-visibility: auto;
+	contain-intrinsic-size: auto 16rem;
+}
+
+@supports not (content-visibility: auto) {
+	.anno-palette-group {
+		contain: layout style paint;
+	}
 }
 
 @media (min-width: 1024px) and (max-width: 1279.98px) {
