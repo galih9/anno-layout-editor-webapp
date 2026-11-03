@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Stage } from "react-konva";
 import type { FunctionComponent } from "../../../common/types";
 import { useDesignerStore } from "../../../store/designerStore";
+import { computeHighlightedCoveredIds } from "../farmRules";
 import { computeCoveredTileSpans, computeLineCells } from "../gridMath";
 import { PRESET_BY_ID } from "../presetsData";
 import { getSpatialIndex } from "../spatialIndex";
@@ -674,41 +675,32 @@ export const LayoutCanvas = ({
 		spatialIndex,
 	]);
 
-	const coveredBuildingIds = useMemo((): ReadonlySet<string> => {
-		if (!primaryCoverageSource || influenceMode === "none") {
-			return EMPTY_STRING_SET;
-		}
-		const sourceCenterX =
-			primaryCoverageSource.rect.x + primaryCoverageSource.rect.width * 0.5;
-		const sourceCenterY =
-			primaryCoverageSource.rect.y + primaryCoverageSource.rect.height * 0.5;
-		const threshold = primaryCoverageSource.radius + 1e-6;
-		const thresholdSquared = threshold * threshold;
-		const covered = new Set<string>();
-
-		for (const item of spatialIndex.coverableBuildings) {
-			const isMovingItem =
-				isActivelyDraggingSelection && movingIdSet.has(item.id);
-			const itemX =
-				isMovingItem && dragMove ? item.x + dragMove.deltaX : item.x;
-			const itemY =
-				isMovingItem && dragMove ? item.y + dragMove.deltaY : item.y;
-			const deltaX = itemX + item.width * 0.5 - sourceCenterX;
-			const deltaY = itemY + item.height * 0.5 - sourceCenterY;
-			if (deltaX * deltaX + deltaY * deltaY <= thresholdSquared) {
-				covered.add(item.id);
-			}
-		}
-
-		return covered.size > 0 ? covered : EMPTY_STRING_SET;
-	}, [
-		dragMove,
-		influenceMode,
-		isActivelyDraggingSelection,
-		movingIdSet,
-		primaryCoverageSource,
-		spatialIndex,
-	]);
+	const coveredBuildingIds = useMemo(
+		(): ReadonlySet<string> =>
+			computeHighlightedCoveredIds({
+				spatialIndex,
+				selectedIds,
+				hoveredBuildingId,
+				influenceMode,
+				ghostRect,
+				ghostPreset: effectiveGhostPreset,
+				isActivelyDraggingSelection,
+				movingIdSet,
+				dragDeltaX: dragMove?.deltaX ?? 0,
+				dragDeltaY: dragMove?.deltaY ?? 0,
+			}),
+		[
+			dragMove,
+			effectiveGhostPreset,
+			ghostRect,
+			hoveredBuildingId,
+			influenceMode,
+			isActivelyDraggingSelection,
+			movingIdSet,
+			selectedIds,
+			spatialIndex,
+		]
+	);
 
 	const discreteCoverageSpans = useMemo((): ReadonlyArray<TileSpan> => {
 		if (

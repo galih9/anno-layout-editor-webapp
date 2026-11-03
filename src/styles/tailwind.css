@@ -6,6 +6,10 @@
 	initial-value: 0;
 }
 
+:root {
+	--anno-icon-check: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='20 6 9 17 4 12'></polyline></svg>");
+}
+
 @layer base {
 	html,
 	body,
@@ -37,6 +41,71 @@ dialog::backdrop {
 	display: flex;
 	flex-wrap: wrap;
 	flex-wrap: balance;
+}
+
+/* Custom Accessible Checkbox */
+.anno-checkbox {
+	--checkbox-size: 1.15em;
+	--checkbox-icon-size: 0.72em;
+	appearance: none;
+	display: inline-grid;
+	place-content: center;
+	inline-size: var(--checkbox-size);
+	aspect-ratio: 1;
+	margin: 0;
+	flex-shrink: 0;
+	border-radius: 0.25rem;
+	border: 1.5px solid currentColor;
+	background-color: rgba(12, 10, 9, 0.75);
+	cursor: pointer;
+}
+
+.anno-checkbox::before {
+	content: "";
+	inline-size: var(--checkbox-icon-size);
+	aspect-ratio: 1;
+	background-color: currentColor;
+	mask: var(--anno-icon-check) no-repeat center / contain;
+	scale: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+	.anno-checkbox::before {
+		transition: scale 150ms ease;
+	}
+}
+
+@media (forced-colors: active) {
+	.anno-checkbox::before {
+		background-color: CanvasText;
+	}
+}
+
+.anno-checkbox:checked {
+	border-color: #fbbf24;
+	background-color: #fbbf24;
+	color: #0c0a09;
+}
+
+.anno-checkbox:checked::before {
+	scale: 1;
+}
+
+.anno-checkbox:focus-visible {
+	outline: 2px solid #fbbf24;
+	outline-offset: 2px;
+}
+
+.anno-checkbox:disabled {
+	cursor: not-allowed;
+	opacity: 0.5;
+}
+
+@media (pointer: coarse) {
+	.anno-checkbox-hit {
+		min-block-size: 2.75rem;
+		min-inline-size: 2.75rem;
+	}
 }
 
 /* Workbench Shell Layout */

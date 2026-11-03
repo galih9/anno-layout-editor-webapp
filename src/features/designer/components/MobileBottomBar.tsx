@@ -7,6 +7,7 @@ import {
 	DocumentDuplicateIcon,
 	ExclamationTriangleIcon,
 	HandRaisedIcon,
+	SparklesIcon,
 	Squares2X2Icon,
 	TrashIcon,
 	XMarkIcon,
@@ -14,6 +15,12 @@ import {
 import { useMemo } from "react";
 import type { FunctionComponent } from "../../../common/types";
 import { useDesignerStore } from "../../../store/designerStore";
+import {
+	FARM_FIELD_PRESET_IDS,
+	FARM_FIELD_RULES,
+	findEligibleFarmsForField,
+	TREE_FARM_RULES,
+} from "../farmRules";
 import { PRESET_BY_ID } from "../presetsData";
 import { getSpatialIndex } from "../spatialIndex";
 import type { ActiveTool } from "../types";
@@ -54,6 +61,15 @@ export const MobileBottomBar = ({
 		(state) => state.duplicateSelectedBuildings
 	);
 	const removeBuildings = useDesignerStore((state) => state.removeBuildings);
+	const populateTreesForBuilding = useDesignerStore(
+		(state) => state.populateTreesForBuilding
+	);
+	const spawnFieldsForFarm = useDesignerStore(
+		(state) => state.spawnFieldsForFarm
+	);
+	const assignFieldToFarm = useDesignerStore(
+		(state) => state.assignFieldToFarm
+	);
 
 	const spatialIndex = useMemo(
 		() => getSpatialIndex(buildings, gridWidth, gridHeight),
@@ -80,6 +96,61 @@ export const MobileBottomBar = ({
 		}
 		return null;
 	}, [activePresetId, activeTool]);
+
+	const quickFarmAction = useMemo(() => {
+		if (!singleSelectedBuilding) {
+			return null;
+		}
+		if (TREE_FARM_RULES.has(singleSelectedBuilding.presetId)) {
+			return {
+				label: "Populate",
+				ariaLabel: "Populate trees",
+				onTrigger: (): void => {
+					populateTreesForBuilding(singleSelectedBuilding.id);
+				},
+			};
+		}
+		const farmRule = FARM_FIELD_RULES.get(singleSelectedBuilding.presetId);
+		if (farmRule) {
+			const connectedCount = singleSelectedBuilding.childIds?.length ?? 0;
+			if (connectedCount < farmRule.maxFields) {
+				return {
+					label: "Spawn",
+					ariaLabel: "Spawn fields",
+					onTrigger: (): void => {
+						spawnFieldsForFarm(singleSelectedBuilding.id);
+					},
+				};
+			}
+			return null;
+		}
+		if (
+			FARM_FIELD_PRESET_IDS.has(singleSelectedBuilding.presetId) &&
+			singleSelectedBuilding.parentId === undefined
+		) {
+			const eligible = findEligibleFarmsForField(
+				singleSelectedBuilding,
+				buildings
+			);
+			const closest = eligible[0];
+			if (closest) {
+				return {
+					label: "Assign",
+					ariaLabel: "Assign field to farm",
+					onTrigger: (): void => {
+						assignFieldToFarm(singleSelectedBuilding.id, closest.farm.id);
+					},
+				};
+			}
+		}
+		return null;
+	}, [
+		assignFieldToFarm,
+		buildings,
+		populateTreesForBuilding,
+		singleSelectedBuilding,
+		spawnFieldsForFarm,
+	]);
 
 	const handleSelectTool = (tool: ActiveTool): void => {
 		onCloseDrawers();
@@ -169,6 +240,17 @@ export const MobileBottomBar = ({
 					</button>
 
 					<div className="flex shrink-0 items-center gap-1">
+						{quickFarmAction && (
+							<button
+								aria-label={quickFarmAction.ariaLabel}
+								className="anno-touch-target inline-flex items-center justify-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1.5 text-xs font-semibold text-emerald-300 active:bg-emerald-500/25"
+								type="button"
+								onClick={quickFarmAction.onTrigger}
+							>
+								<SparklesIcon aria-hidden="true" className="h-4 w-4" />
+								<span>{quickFarmAction.label}</span>
+							</button>
+						)}
 						<button
 							aria-label="Rotate selected"
 							className="anno-touch-target inline-flex items-center justify-center gap-1 rounded-md border border-stone-700 bg-stone-800 px-2.5 py-1.5 text-xs font-medium text-stone-200 active:bg-stone-700 disabled:opacity-35"

@@ -35,6 +35,8 @@ export const TopToolbar = ({
 }: TopToolbarProps): FunctionComponent => {
 	const layoutNameInputId = useId();
 	const influenceSelectId = useId();
+	const autoAscendInputId = useId();
+	const showLabelsInputId = useId();
 	const mobileMenuId = useId();
 
 	const [isViewMenuOpen, setIsViewMenuOpen] = useState<boolean>(false);
@@ -50,6 +52,8 @@ export const TopToolbar = ({
 	const showDiscreteTiles = useDesignerStore(
 		(state) => state.showDiscreteTiles
 	);
+	const autoAscend = useDesignerStore((state) => state.autoAscend);
+	const isAutoAscending = useDesignerStore((state) => state.isAutoAscending);
 	const influenceMode = useDesignerStore((state) => state.influenceMode);
 	const canvasTheme = useDesignerStore((state) => state.canvasTheme);
 
@@ -62,10 +66,11 @@ export const TopToolbar = ({
 	const redo = useDesignerStore((state) => state.redo);
 	const toggleShowGrid = useDesignerStore((state) => state.toggleShowGrid);
 	const toggleShowIcons = useDesignerStore((state) => state.toggleShowIcons);
-	const toggleShowLabels = useDesignerStore((state) => state.toggleShowLabels);
+	const setShowLabels = useDesignerStore((state) => state.setShowLabels);
 	const toggleShowDiscreteTiles = useDesignerStore(
 		(state) => state.toggleShowDiscreteTiles
 	);
+	const setAutoAscend = useDesignerStore((state) => state.setAutoAscend);
 	const setInfluenceMode = useDesignerStore((state) => state.setInfluenceMode);
 	const setCanvasTheme = useDesignerStore((state) => state.setCanvasTheme);
 	const clearBoard = useDesignerStore((state) => state.clearBoard);
@@ -187,6 +192,20 @@ export const TopToolbar = ({
 						<span className="hidden md:inline">File</span>
 					</button>
 
+					{isAutoAscending && !isViewMenuOpen && (
+						<span
+							aria-live="polite"
+							className="inline-flex items-center gap-1 rounded-md border border-amber-500/35 bg-amber-500/15 px-2 py-1 text-[11px] font-medium text-amber-300"
+							role="status"
+						>
+							<ArrowPathIcon
+								aria-hidden="true"
+								className="h-3.5 w-3.5 animate-spin"
+							/>
+							<span className="hidden sm:inline">Calculating…</span>
+						</span>
+					)}
+
 					<div ref={viewMenuContainerRef} className="relative">
 						<button
 							aria-controls={mobileMenuId}
@@ -233,6 +252,64 @@ export const TopToolbar = ({
 								</div>
 
 								<div className="mt-2.5 flex flex-col gap-3">
+									<label
+										aria-busy={isAutoAscending}
+										htmlFor={autoAscendInputId}
+										className={`flex min-h-11 cursor-pointer items-center justify-between gap-2 rounded-md border px-2.5 py-2 text-xs font-medium transition select-none ${
+											autoAscend
+												? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+												: "border-stone-800 bg-stone-900 text-stone-200"
+										}`}
+									>
+										<span className="inline-flex items-center gap-2">
+											<input
+												checked={autoAscend}
+												className="anno-checkbox"
+												id={autoAscendInputId}
+												type="checkbox"
+												onChange={(event): void => {
+													void setAutoAscend(event.target.checked);
+												}}
+											/>
+											<span>Auto Ascend</span>
+										</span>
+										{isAutoAscending && (
+											<span
+												aria-live="polite"
+												className="inline-flex items-center gap-1 text-[11px] font-normal text-amber-200"
+												role="status"
+											>
+												<ArrowPathIcon
+													aria-hidden="true"
+													className="h-3.5 w-3.5 animate-spin text-amber-400"
+												/>
+												<span>Calculating…</span>
+											</span>
+										)}
+									</label>
+
+									<label
+										htmlFor={showLabelsInputId}
+										className={`flex min-h-11 cursor-pointer items-center justify-between gap-2 rounded-md border px-2.5 py-2 text-xs font-medium transition select-none ${
+											showLabels
+												? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+												: "border-stone-800 bg-stone-900 text-stone-200"
+										}`}
+									>
+										<span className="inline-flex items-center gap-2">
+											<input
+												checked={showLabels}
+												className="anno-checkbox"
+												id={showLabelsInputId}
+												type="checkbox"
+												onChange={(event): void => {
+													setShowLabels(event.target.checked);
+												}}
+											/>
+											<span>Show Labels</span>
+										</span>
+									</label>
+
 									<div>
 										<label
 											className="block text-[11px] font-medium text-stone-400"
@@ -257,11 +334,11 @@ export const TopToolbar = ({
 										</select>
 									</div>
 
-									<div className="grid grid-cols-2 gap-1.5">
+									<div className="grid grid-cols-3 gap-1.5">
 										<button
 											aria-pressed={showDiscreteTiles}
 											type="button"
-											className={`anno-touch-target rounded-md border px-2.5 py-2 text-xs font-medium ${
+											className={`anno-touch-target rounded-md border px-2 py-2 text-xs font-medium ${
 												showDiscreteTiles
 													? "border-emerald-500/40 bg-emerald-500/20 text-emerald-300"
 													: "border-stone-800 bg-stone-900 text-stone-300"
@@ -273,7 +350,7 @@ export const TopToolbar = ({
 										<button
 											aria-pressed={showGrid}
 											type="button"
-											className={`anno-touch-target rounded-md border px-2.5 py-2 text-xs font-medium ${
+											className={`anno-touch-target rounded-md border px-2 py-2 text-xs font-medium ${
 												showGrid
 													? "border-amber-500/40 bg-amber-500/20 text-amber-300"
 													: "border-stone-800 bg-stone-900 text-stone-300"
@@ -285,26 +362,14 @@ export const TopToolbar = ({
 										<button
 											aria-pressed={showIcons}
 											type="button"
-											className={`anno-touch-target rounded-md border px-2.5 py-2 text-xs font-medium ${
+											className={`anno-touch-target rounded-md border px-2 py-2 text-xs font-medium ${
 												showIcons
 													? "border-amber-500/40 bg-amber-500/20 text-amber-300"
 													: "border-stone-800 bg-stone-900 text-stone-300"
 											}`}
 											onClick={toggleShowIcons}
 										>
-											Building Icons
-										</button>
-										<button
-											aria-pressed={showLabels}
-											type="button"
-											className={`anno-touch-target rounded-md border px-2.5 py-2 text-xs font-medium ${
-												showLabels
-													? "border-amber-500/40 bg-amber-500/20 text-amber-300"
-													: "border-stone-800 bg-stone-900 text-stone-300"
-											}`}
-											onClick={toggleShowLabels}
-										>
-											Text Labels
+											Icons
 										</button>
 									</div>
 
@@ -529,6 +594,62 @@ export const TopToolbar = ({
 
 			{/* View Overlays & Studio Actions */}
 			<div className="flex flex-wrap items-center gap-1.5 text-xs">
+				<label
+					aria-busy={isAutoAscending}
+					htmlFor={autoAscendInputId}
+					title="Automatically upgrade road-connected houses within Marketplace/Bazaar and service radii to their highest eligible tier"
+					className={`anno-checkbox-hit inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition select-none ${
+						autoAscend
+							? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+							: "border-stone-800 bg-stone-900 text-stone-200 hover:border-amber-400/40 hover:text-amber-300"
+					}`}
+				>
+					<input
+						checked={autoAscend}
+						className="anno-checkbox"
+						id={autoAscendInputId}
+						type="checkbox"
+						onChange={(event): void => {
+							void setAutoAscend(event.target.checked);
+						}}
+					/>
+					<span>Auto Ascend</span>
+					{isAutoAscending && (
+						<span
+							aria-live="polite"
+							className="inline-flex items-center gap-1 text-[11px] font-normal text-amber-200"
+							role="status"
+						>
+							<ArrowPathIcon
+								aria-hidden="true"
+								className="h-3.5 w-3.5 animate-spin text-amber-400"
+							/>
+							<span>Calculating…</span>
+						</span>
+					)}
+				</label>
+
+				<label
+					htmlFor={showLabelsInputId}
+					title="Show or hide text labels on placed buildings"
+					className={`anno-checkbox-hit inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition select-none ${
+						showLabels
+							? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+							: "border-stone-800 bg-stone-900 text-stone-200 hover:border-amber-400/40 hover:text-amber-300"
+					}`}
+				>
+					<input
+						checked={showLabels}
+						className="anno-checkbox"
+						id={showLabelsInputId}
+						type="checkbox"
+						onChange={(event): void => {
+							setShowLabels(event.target.checked);
+						}}
+					/>
+					<span>Show Labels</span>
+				</label>
+
 				<div className="flex items-center gap-1 rounded-md border border-stone-800 bg-stone-900 px-2 py-1">
 					<label
 						className="text-[11px] text-stone-400"
@@ -587,18 +708,6 @@ export const TopToolbar = ({
 						onClick={toggleShowIcons}
 					>
 						Icons
-					</button>
-					<button
-						aria-pressed={showLabels}
-						type="button"
-						className={`rounded px-2 py-1 text-[11px] font-medium ${
-							showLabels
-								? "bg-amber-500/20 text-amber-300"
-								: "text-stone-400 hover:text-stone-200"
-						}`}
-						onClick={toggleShowLabels}
-					>
-						Labels
 					</button>
 					<button
 						aria-label="Toggle parchment or dark canvas theme"

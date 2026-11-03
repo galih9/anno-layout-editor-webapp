@@ -1,14 +1,29 @@
 import {
 	ArrowPathIcon,
 	CheckCircleIcon,
+	CheckIcon,
 	DocumentDuplicateIcon,
 	ExclamationTriangleIcon,
+	PlusIcon,
+	SparklesIcon,
 	TrashIcon,
 	XMarkIcon,
 } from "@heroicons/react/24/outline";
 import { useDeferredValue, useId, useMemo } from "react";
 import type { FunctionComponent } from "../../../common/types";
 import { useDesignerStore } from "../../../store/designerStore";
+import {
+	computeTreePopulatePlan,
+	CUSTOM_COLOR_PRESETS,
+	FARM_FIELD_PRESET_IDS,
+	FARM_FIELD_RULES,
+	findEligibleFarmsForField,
+	findEligibleTreeFarmsForTree,
+	findUnassignedFieldsInRadius,
+	isParentWithChildrenRule,
+	TREE_FARM_RULES,
+	TREE_TILE_PRESET_ID,
+} from "../farmRules";
 import { computeLayoutStatistics, isRectCoveredBySource } from "../gridMath";
 import {
 	MARKETHOUSE_PRESET_IDS,
@@ -40,6 +55,7 @@ export const InspectorPanel = ({
 }: InspectorPanelProps): FunctionComponent => {
 	const customLabelId = useId();
 	const customColorId = useId();
+	const customColorPresetsListId = useId();
 
 	const buildings = useDesignerStore((state) => state.buildings);
 	const gridWidth = useDesignerStore((state) => state.gridWidth);
@@ -59,7 +75,26 @@ export const InspectorPanel = ({
 	const updateBuildingCustomization = useDesignerStore(
 		(state) => state.updateBuildingCustomization
 	);
+	const setSelectedIds = useDesignerStore((state) => state.setSelectedIds);
 	const selectByPresetId = useDesignerStore((state) => state.selectByPresetId);
+	const populateTreesForBuilding = useDesignerStore(
+		(state) => state.populateTreesForBuilding
+	);
+	const spawnFieldsForFarm = useDesignerStore(
+		(state) => state.spawnFieldsForFarm
+	);
+	const assignFieldToFarm = useDesignerStore(
+		(state) => state.assignFieldToFarm
+	);
+	const assignTreeToBuilding = useDesignerStore(
+		(state) => state.assignTreeToBuilding
+	);
+	const unassignChildFromParent = useDesignerStore(
+		(state) => state.unassignChildFromParent
+	);
+	const clearChildrenOfBuilding = useDesignerStore(
+		(state) => state.clearChildrenOfBuilding
+	);
 	const cancelActiveAction = useDesignerStore(
 		(state) => state.cancelActiveAction
 	);
@@ -96,12 +131,13 @@ export const InspectorPanel = ({
 		return PRESET_BY_ID.get(singleSelectedBuilding.presetId) ?? null;
 	}, [singleSelectedBuilding]);
 
-	// Coverage analysis when a building with radius > 0 is selected
+	// Coverage analysis when a service/radius building (excluding tree/field farms) is selected
 	const selectedCoverageStats = useMemo(() => {
 		if (
 			!singleSelectedBuilding ||
 			!singleSelectedPreset ||
-			singleSelectedPreset.influenceRadius <= 0
+			singleSelectedPreset.influenceRadius <= 0 ||
+			isParentWithChildrenRule(singleSelectedBuilding.presetId)
 		) {
 			return null;
 		}
@@ -233,6 +269,118 @@ export const InspectorPanel = ({
 
 		return { hasMarkethouse, hasNoria };
 	}, [singleSelectedBuilding, singleSelectedPreset, spatialIndex]);
+
+	// Tree-using building inspector state (Lumberjack's hut, Charcoal burner's hut, Forest glassworks)
+	const selectedTreeFarmInfo = useMemo(() => {
+		if (!singleSelectedBuilding) {
+			return null;
+		}
+		const rule = TREE_FARM_RULES.get(singleSelectedBuilding.presetId);
+		if (!rule) {
+			return null;
+		}
+		const connectedCount = singleSelectedBuilding.childIds?.length ?? 0;
+		const plan = computeTreePopulatePlan(
+			singleSelectedBuilding,
+			buildings,
+			gridWidth,
+			gridHeight
+		);
+		const availableToPopulate =
+			plan.newTreePoints.length + plan.adoptedTreeIds.length;
+		const productivityPercent = Math.min(
+			100,
+			Math.round((connectedCount / rule.optimalTrees) * 100)
+		);
+		return {
+			rule,
+			connectedCount,
+			availableToPopulate,
+			productivityPercent,
+		};
+	}, [buildings, gridHeight, gridWidth, singleSelectedBuilding]);
+
+	// Field-using farm inspector state (all 17 Occidental & Oriental farms)
+	const selectedFieldFarmInfo = useMemo(() => {
+		if (!singleSelectedBuilding) {
+			return null;
+		}
+		const rule = FARM_FIELD_RULES.get(singleSelectedBuilding.presetId);
+		if (!rule) {
+			return null;
+		}
+		const connectedCount = singleSelectedBuilding.childIds?.length ?? 0;
+		const remainingSlots = Math.max(0, rule.maxFields - connectedCount);
+		const unassignedInRadius =
+			remainingSlots > 0
+				? findUnassignedFieldsInRadius(singleSelectedBuilding, buildings)
+				: [];
+		const productivityPercent = Math.min(
+			100,
+			Math.round((connectedCount / rule.maxFields) * 100)
+		);
+		return {
+			rule,
+			connectedCount,
+			remainingSlots,
+			unassignedInRadius,
+			productivityPercent,
+		};
+	}, [buildings, singleSelectedBuilding]);
+
+	// Selected Farm Field assignment state (parent farm or eligible farms to assign)
+	const selectedFieldAssignmentInfo = useMemo(() => {
+		if (
+			!singleSelectedBuilding ||
+			!FARM_FIELD_PRESET_IDS.has(singleSelectedBuilding.presetId)
+		) {
+			return null;
+		}
+		const parentFarm = singleSelectedBuilding.parentId
+			? (spatialIndex.buildingById.get(singleSelectedBuilding.parentId) ?? null)
+			: null;
+		const parentRule = parentFarm
+			? (FARM_FIELD_RULES.get(parentFarm.presetId) ?? null)
+			: null;
+		const parentPreset = parentFarm
+			? (PRESET_BY_ID.get(parentFarm.presetId) ?? null)
+			: null;
+		const eligibleFarms = parentFarm
+			? []
+			: findEligibleFarmsForField(singleSelectedBuilding, buildings);
+
+		return {
+			parentFarm,
+			parentRule,
+			parentPreset,
+			eligibleFarms,
+		};
+	}, [buildings, singleSelectedBuilding, spatialIndex]);
+
+	// Selected TreeTile_1x1 parent/assignment state
+	const selectedTreeAssignmentInfo = useMemo(() => {
+		if (
+			!singleSelectedBuilding ||
+			singleSelectedBuilding.presetId !== TREE_TILE_PRESET_ID
+		) {
+			return null;
+		}
+		const parentBuilding = singleSelectedBuilding.parentId
+			? (spatialIndex.buildingById.get(singleSelectedBuilding.parentId) ?? null)
+			: null;
+		const parentPreset = parentBuilding
+			? (PRESET_BY_ID.get(parentBuilding.presetId) ?? null)
+			: null;
+		const eligibleTreeFarms = parentBuilding
+			? []
+			: findEligibleTreeFarmsForTree(singleSelectedBuilding, buildings);
+
+		return {
+			parentBuilding,
+			parentPreset,
+			eligibleTreeFarms,
+		};
+	}, [buildings, singleSelectedBuilding, spatialIndex]);
 
 	// Global settlement housing check powered by O(1) road adjacency & pre-indexed providers
 	const globalHousingHealth = useMemo(() => {
@@ -404,60 +552,500 @@ export const InspectorPanel = ({
 						</div>
 
 						{/* Custom Label & Color */}
-						<div className="mt-3 grid grid-cols-[1fr_auto] items-end gap-2 border-t border-stone-800 pt-2.5">
-							<div>
-								<label
-									className="block text-[10px] font-medium text-stone-400"
-									htmlFor={customLabelId}
-								>
-									Custom Label
-								</label>
-								<input
-									className="mt-0.5 w-full rounded border border-stone-700 bg-stone-950 px-2 py-1 text-base text-stone-100 placeholder:text-stone-500 focus:border-amber-400 focus:outline-none lg:text-xs"
-									id={customLabelId}
-									placeholder={singleSelectedPreset.name}
-									type="text"
-									value={singleSelectedBuilding.customLabel ?? ""}
-									onChange={(event): void => {
-										updateBuildingCustomization(singleSelectedBuilding.id, {
-											customLabel: event.target.value,
-										});
-									}}
-								/>
-							</div>
-							<div className="flex items-center gap-1">
-								<label className="sr-only" htmlFor={customColorId}>
-									Tile color override
-								</label>
-								<input
-									className="anno-touch-target h-8 w-9 cursor-pointer rounded border border-stone-700 bg-stone-950 p-0.5 lg:h-7 lg:w-8"
-									id={customColorId}
-									type="color"
-									value={
-										singleSelectedBuilding.customColor ??
-										rgbaToHex(singleSelectedPreset.color)
-									}
-									onChange={(event): void => {
-										updateBuildingCustomization(singleSelectedBuilding.id, {
-											customColor: event.target.value,
-										});
-									}}
-								/>
-								{singleSelectedBuilding.customColor && (
-									<button
-										className="rounded px-1.5 py-1 text-[10px] text-stone-400 hover:bg-stone-800 hover:text-stone-200"
-										type="button"
-										onClick={(): void => {
+						<div className="mt-3 border-t border-stone-800 pt-2.5">
+							<div className="grid grid-cols-[1fr_auto] items-end gap-2">
+								<div>
+									<label
+										className="block text-[10px] font-medium text-stone-400"
+										htmlFor={customLabelId}
+									>
+										Custom Label
+									</label>
+									<input
+										className="mt-0.5 w-full rounded border border-stone-700 bg-stone-950 px-2 py-1 text-base text-stone-100 placeholder:text-stone-500 focus:border-amber-400 focus:outline-none lg:text-xs"
+										id={customLabelId}
+										placeholder={singleSelectedPreset.name}
+										type="text"
+										value={singleSelectedBuilding.customLabel ?? ""}
+										onChange={(event): void => {
 											updateBuildingCustomization(singleSelectedBuilding.id, {
-												customColor: "",
+												customLabel: event.target.value,
 											});
 										}}
-									>
-										Reset
-									</button>
-								)}
+									/>
+								</div>
+								<div className="flex items-center gap-1">
+									<label className="sr-only" htmlFor={customColorId}>
+										Tile color override
+									</label>
+									<input
+										className="anno-touch-target h-8 w-9 cursor-pointer rounded border border-stone-700 bg-stone-950 p-0.5 lg:h-7 lg:w-8"
+										id={customColorId}
+										list={customColorPresetsListId}
+										type="color"
+										value={
+											singleSelectedBuilding.customColor ??
+											rgbaToHex(singleSelectedPreset.color)
+										}
+										onChange={(event): void => {
+											updateBuildingCustomization(singleSelectedBuilding.id, {
+												customColor: event.target.value,
+											});
+										}}
+									/>
+									<datalist id={customColorPresetsListId}>
+										{CUSTOM_COLOR_PRESETS.map((swatch) => (
+											<option key={swatch.hex} value={swatch.hex} />
+										))}
+									</datalist>
+									{singleSelectedBuilding.customColor && (
+										<button
+											className="rounded px-1.5 py-1 text-[10px] text-stone-400 hover:bg-stone-800 hover:text-stone-200"
+											type="button"
+											onClick={(): void => {
+												updateBuildingCustomization(singleSelectedBuilding.id, {
+													customColor: "",
+												});
+											}}
+										>
+											Reset
+										</button>
+									)}
+								</div>
+							</div>
+
+							<div className="mt-2">
+								<span className="block text-[10px] font-medium text-stone-400">
+									Preset Colors
+								</span>
+								<div
+									aria-label="Preset label and tile colors"
+									className="mt-1 flex flex-wrap gap-1.5"
+									role="group"
+								>
+									{CUSTOM_COLOR_PRESETS.map((swatch) => {
+										const isActiveSwatch =
+											singleSelectedBuilding.customColor?.toLowerCase() ===
+											swatch.hex.toLowerCase();
+										return (
+											<button
+												key={swatch.hex}
+												aria-label={`Apply ${swatch.name} color (${swatch.hex})`}
+												aria-pressed={isActiveSwatch}
+												title={`${swatch.name} (${swatch.hex})`}
+												type="button"
+												className={`inline-flex h-6 w-6 items-center justify-center rounded border transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400 ${
+													isActiveSwatch
+														? "scale-105 border-white ring-2 ring-amber-300 ring-offset-1 ring-offset-stone-900"
+														: "border-black/50 hover:scale-105 hover:border-stone-200"
+												}`}
+												style={{
+													backgroundColor: swatch.hex,
+													forcedColorAdjust: "none",
+												}}
+												onClick={(): void => {
+													updateBuildingCustomization(
+														singleSelectedBuilding.id,
+														{
+															customColor: swatch.hex,
+														}
+													);
+												}}
+											>
+												{isActiveSwatch && (
+													<CheckIcon
+														aria-hidden="true"
+														className="h-3.5 w-3.5 stroke-[2.5] text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.85)]"
+													/>
+												)}
+											</button>
+										);
+									})}
+								</div>
 							</div>
 						</div>
+
+						{/* Tree-Using Production / Farm: Populate Connected Forest */}
+						{selectedTreeFarmInfo && (
+							<div className="mt-3 border-t border-stone-800 pt-2.5">
+								<div className="flex items-center justify-between">
+									<h4 className="text-[11px] font-semibold tracking-wide text-emerald-300 uppercase">
+										Connected Forest
+									</h4>
+									<span className="font-mono text-xs font-semibold text-emerald-400">
+										{selectedTreeFarmInfo.connectedCount} /{" "}
+										{selectedTreeFarmInfo.rule.optimalTrees} (
+										{selectedTreeFarmInfo.productivityPercent}%)
+									</span>
+								</div>
+								<p className="mt-0.5 text-[11px] text-stone-400">
+									Requires {selectedTreeFarmInfo.rule.optimalTrees} connected
+									trees for 100% {selectedTreeFarmInfo.rule.productLabel}{" "}
+									output.
+								</p>
+								<div className="mt-1.5 h-1.5 w-full overflow-clip rounded-full bg-stone-800">
+									<div
+										className="h-full rounded-full bg-emerald-400 transition-all"
+										style={{
+											width: `${selectedTreeFarmInfo.productivityPercent}%`,
+										}}
+									/>
+								</div>
+
+								<button
+									className="anno-touch-target mt-2.5 inline-flex w-full items-center justify-center gap-1.5 rounded border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-45"
+									disabled={selectedTreeFarmInfo.availableToPopulate === 0}
+									type="button"
+									onClick={(): void => {
+										populateTreesForBuilding(singleSelectedBuilding.id);
+									}}
+								>
+									<SparklesIcon aria-hidden="true" className="h-3.5 w-3.5" />
+									<span>
+										{selectedTreeFarmInfo.availableToPopulate > 0
+											? `Populate Trees (+${selectedTreeFarmInfo.availableToPopulate})`
+											: "Radius Populated"}
+									</span>
+								</button>
+
+								{selectedTreeFarmInfo.connectedCount > 0 && (
+									<div className="mt-1.5 grid grid-cols-2 gap-1.5">
+										<button
+											className="anno-touch-target rounded border border-stone-700 bg-stone-800 px-2 py-1 text-[11px] font-medium text-stone-200 hover:border-emerald-400/50 hover:text-emerald-300"
+											type="button"
+											onClick={(): void => {
+												setSelectedIds([
+													singleSelectedBuilding.id,
+													...(singleSelectedBuilding.childIds ?? []),
+												]);
+											}}
+										>
+											Select + Trees
+										</button>
+										<button
+											className="anno-touch-target rounded border border-red-900/50 bg-red-950/30 px-2 py-1 text-[11px] font-medium text-red-300 hover:bg-red-900/40"
+											type="button"
+											onClick={(): void => {
+												clearChildrenOfBuilding(singleSelectedBuilding.id);
+											}}
+										>
+											Clear Trees
+										</button>
+									</div>
+								)}
+							</div>
+						)}
+
+						{/* Field-Using Farm: Spawn Fields & Assign Unassigned Fields */}
+						{selectedFieldFarmInfo && (
+							<div className="mt-3 border-t border-stone-800 pt-2.5">
+								<div className="flex items-center justify-between">
+									<h4 className="text-[11px] font-semibold tracking-wide text-emerald-300 uppercase">
+										Farm Fields ({selectedFieldFarmInfo.rule.fieldDimensionsLabel}
+										)
+									</h4>
+									<span className="font-mono text-xs font-semibold text-emerald-400">
+										{selectedFieldFarmInfo.connectedCount} /{" "}
+										{selectedFieldFarmInfo.rule.maxFields}
+									</span>
+								</div>
+								<p className="mt-0.5 text-[11px] text-stone-400">
+									Max {selectedFieldFarmInfo.rule.maxFields} ×{" "}
+									{selectedFieldFarmInfo.rule.fieldDimensionsLabel}{" "}
+									{selectedFieldFarmInfo.rule.fieldLabel} inside radius{" "}
+									{singleSelectedPreset.influenceRadius}.
+								</p>
+								<div className="mt-1.5 h-1.5 w-full overflow-clip rounded-full bg-stone-800">
+									<div
+										className="h-full rounded-full bg-emerald-400 transition-all"
+										style={{
+											width: `${selectedFieldFarmInfo.productivityPercent}%`,
+										}}
+									/>
+								</div>
+
+								<div className="mt-2.5 grid grid-cols-[1fr_auto] gap-1.5">
+									<button
+										className="anno-touch-target inline-flex items-center justify-center gap-1.5 rounded border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-45"
+										disabled={selectedFieldFarmInfo.remainingSlots === 0}
+										type="button"
+										onClick={(): void => {
+											spawnFieldsForFarm(singleSelectedBuilding.id);
+										}}
+									>
+										<SparklesIcon aria-hidden="true" className="h-3.5 w-3.5" />
+										<span>
+											{selectedFieldFarmInfo.remainingSlots > 0
+												? `Spawn Fields (+${selectedFieldFarmInfo.remainingSlots})`
+												: "All Fields Spawned"}
+										</span>
+									</button>
+									<button
+										aria-label="Spawn 1 field"
+										className="anno-touch-target inline-flex items-center justify-center gap-1 rounded border border-stone-700 bg-stone-800 px-2.5 py-1.5 text-xs font-medium text-stone-200 hover:border-emerald-400/50 hover:text-emerald-300 disabled:cursor-not-allowed disabled:opacity-45"
+										disabled={selectedFieldFarmInfo.remainingSlots === 0}
+										type="button"
+										onClick={(): void => {
+											spawnFieldsForFarm(singleSelectedBuilding.id, 1);
+										}}
+									>
+										<PlusIcon aria-hidden="true" className="h-3.5 w-3.5" />
+										<span>1 Field</span>
+									</button>
+								</div>
+
+								{selectedFieldFarmInfo.connectedCount > 0 && (
+									<div className="mt-1.5 grid grid-cols-2 gap-1.5">
+										<button
+											className="anno-touch-target rounded border border-stone-700 bg-stone-800 px-2 py-1 text-[11px] font-medium text-stone-200 hover:border-emerald-400/50 hover:text-emerald-300"
+											type="button"
+											onClick={(): void => {
+												setSelectedIds([
+													singleSelectedBuilding.id,
+													...(singleSelectedBuilding.childIds ?? []),
+												]);
+											}}
+										>
+											Select + Fields
+										</button>
+										<button
+											className="anno-touch-target rounded border border-red-900/50 bg-red-950/30 px-2 py-1 text-[11px] font-medium text-red-300 hover:bg-red-900/40"
+											type="button"
+											onClick={(): void => {
+												clearChildrenOfBuilding(singleSelectedBuilding.id);
+											}}
+										>
+											Clear Fields
+										</button>
+									</div>
+								)}
+
+								{selectedFieldFarmInfo.unassignedInRadius.length > 0 && (
+									<div className="mt-2.5 rounded border border-stone-800 bg-stone-950/70 p-2">
+										<span className="block text-[10px] font-semibold tracking-wide text-stone-400 uppercase">
+											Unassigned Fields in Radius
+										</span>
+										<ul className="mt-1.5 flex flex-col gap-1" role="list">
+											{selectedFieldFarmInfo.unassignedInRadius.map((field) => (
+												<li
+													key={field.id}
+													className="flex items-center justify-between gap-2 rounded bg-stone-900 px-2 py-1 text-xs"
+												>
+													<span className="truncate font-mono text-[11px] text-stone-300">
+														{field.width}×{field.height} at ({field.x},{" "}
+														{field.y})
+													</span>
+													<button
+														className="shrink-0 rounded border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-300 hover:bg-emerald-500/25"
+														type="button"
+														onClick={(): void => {
+															assignFieldToFarm(
+																field.id,
+																singleSelectedBuilding.id
+															);
+														}}
+													>
+														Assign
+													</button>
+												</li>
+											))}
+										</ul>
+									</div>
+								)}
+							</div>
+						)}
+
+						{/* Farm Field Selection: Connected Farm or Manual Assign Button */}
+						{selectedFieldAssignmentInfo && (
+							<div className="mt-3 border-t border-stone-800 pt-2.5">
+								<h4 className="text-[11px] font-semibold tracking-wide text-emerald-300 uppercase">
+									Parent Farm Connection
+								</h4>
+								{selectedFieldAssignmentInfo.parentFarm ? (
+									<div className="mt-1.5 rounded border border-emerald-500/30 bg-emerald-950/20 p-2 text-xs">
+										<div className="flex items-center justify-between gap-2">
+											<span className="truncate font-medium text-emerald-200">
+												{selectedFieldAssignmentInfo.parentFarm.customLabel ??
+													selectedFieldAssignmentInfo.parentPreset?.name ??
+													selectedFieldAssignmentInfo.parentFarm.presetId}
+											</span>
+											{selectedFieldAssignmentInfo.parentRule && (
+												<span className="shrink-0 font-mono text-[11px] text-emerald-400">
+													{selectedFieldAssignmentInfo.parentFarm.childIds
+														?.length ?? 0}
+													/{selectedFieldAssignmentInfo.parentRule.maxFields}
+												</span>
+											)}
+										</div>
+										<p className="mt-0.5 text-[11px] text-stone-400">
+											Tile ({selectedFieldAssignmentInfo.parentFarm.x},{" "}
+											{selectedFieldAssignmentInfo.parentFarm.y})
+										</p>
+										<div className="mt-2 grid grid-cols-2 gap-1.5">
+											<button
+												className="anno-touch-target rounded border border-stone-700 bg-stone-800 px-2 py-1 text-[11px] font-medium text-stone-200 hover:border-emerald-400/50 hover:text-emerald-300"
+												type="button"
+												onClick={(): void => {
+													if (selectedFieldAssignmentInfo.parentFarm) {
+														setSelectedIds([
+															selectedFieldAssignmentInfo.parentFarm.id,
+														]);
+													}
+												}}
+											>
+												Select Farm
+											</button>
+											<button
+												className="anno-touch-target rounded border border-stone-700 bg-stone-800 px-2 py-1 text-[11px] font-medium text-amber-300 hover:bg-stone-700"
+												type="button"
+												onClick={(): void => {
+													unassignChildFromParent(singleSelectedBuilding.id);
+												}}
+											>
+												Unassign
+											</button>
+										</div>
+									</div>
+								) : selectedFieldAssignmentInfo.eligibleFarms.length > 0 ? (
+									<div className="mt-1.5">
+										<p className="text-[11px] text-stone-400">
+											Unassigned field — choose an in-range farm with open
+											field capacity:
+										</p>
+										<ul className="mt-1.5 flex flex-col gap-1.5" role="list">
+											{selectedFieldAssignmentInfo.eligibleFarms.map(
+												(match) => {
+													const farmPreset = PRESET_BY_ID.get(
+														match.farm.presetId
+													);
+													const farmDisplayName =
+														match.farm.customLabel ??
+														farmPreset?.name ??
+														match.farm.presetId;
+													return (
+														<li
+															key={match.farm.id}
+															className="flex items-center justify-between gap-2 rounded border border-stone-800 bg-stone-950/80 px-2 py-1.5 text-xs"
+														>
+															<div className="min-w-0">
+																<span className="block truncate font-medium text-stone-200">
+																	{farmDisplayName}
+																</span>
+																<span className="font-mono text-[10px] text-stone-400">
+																	({match.farm.x}, {match.farm.y}) •{" "}
+																	{match.connectedCount}/{match.rule.maxFields}{" "}
+																	fields
+																</span>
+															</div>
+															<button
+																aria-label={`Assign field to ${farmDisplayName} at (${match.farm.x}, ${match.farm.y})`}
+																className="anno-touch-target shrink-0 rounded border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25"
+																type="button"
+																onClick={(): void => {
+																	assignFieldToFarm(
+																		singleSelectedBuilding.id,
+																		match.farm.id
+																	);
+																}}
+															>
+																Assign
+															</button>
+														</li>
+													);
+												}
+											)}
+										</ul>
+									</div>
+								) : (
+									<p className="mt-1 text-[11px] text-stone-400">
+										Unassigned — no matching farm with open field slots covers
+										this tile.
+									</p>
+								)}
+							</div>
+						)}
+
+						{/* Tree Tile Selection: Connected Building or Assign Button */}
+						{selectedTreeAssignmentInfo && (
+							<div className="mt-3 border-t border-stone-800 pt-2.5">
+								<h4 className="text-[11px] font-semibold tracking-wide text-emerald-300 uppercase">
+									Forest Connection
+								</h4>
+								{selectedTreeAssignmentInfo.parentBuilding ? (
+									<div className="mt-1.5 rounded border border-emerald-500/30 bg-emerald-950/20 p-2 text-xs">
+										<p className="truncate font-medium text-emerald-200">
+											{selectedTreeAssignmentInfo.parentBuilding.customLabel ??
+												selectedTreeAssignmentInfo.parentPreset?.name ??
+												selectedTreeAssignmentInfo.parentBuilding.presetId}
+										</p>
+										<p className="mt-0.5 text-[11px] text-stone-400">
+											Tile ({selectedTreeAssignmentInfo.parentBuilding.x},{" "}
+											{selectedTreeAssignmentInfo.parentBuilding.y})
+										</p>
+										<div className="mt-2 grid grid-cols-2 gap-1.5">
+											<button
+												className="anno-touch-target rounded border border-stone-700 bg-stone-800 px-2 py-1 text-[11px] font-medium text-stone-200 hover:border-emerald-400/50 hover:text-emerald-300"
+												type="button"
+												onClick={(): void => {
+													if (selectedTreeAssignmentInfo.parentBuilding) {
+														setSelectedIds([
+															selectedTreeAssignmentInfo.parentBuilding.id,
+														]);
+													}
+												}}
+											>
+												Select Parent
+											</button>
+											<button
+												className="anno-touch-target rounded border border-stone-700 bg-stone-800 px-2 py-1 text-[11px] font-medium text-amber-300 hover:bg-stone-700"
+												type="button"
+												onClick={(): void => {
+													unassignChildFromParent(singleSelectedBuilding.id);
+												}}
+											>
+												Unassign
+											</button>
+										</div>
+									</div>
+								) : selectedTreeAssignmentInfo.eligibleTreeFarms.length > 0 ? (
+									<ul className="mt-1.5 flex flex-col gap-1.5" role="list">
+										{selectedTreeAssignmentInfo.eligibleTreeFarms.map(
+											(farm) => {
+												const farmPreset = PRESET_BY_ID.get(farm.presetId);
+												const farmDisplayName =
+													farm.customLabel ?? farmPreset?.name ?? farm.presetId;
+												return (
+													<li
+														key={farm.id}
+														className="flex items-center justify-between gap-2 rounded border border-stone-800 bg-stone-950/80 px-2 py-1.5 text-xs"
+													>
+														<span className="truncate text-stone-200">
+															{farmDisplayName} ({farm.x}, {farm.y})
+														</span>
+														<button
+															className="anno-touch-target shrink-0 rounded border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25"
+															type="button"
+															onClick={(): void => {
+																assignTreeToBuilding(
+																	singleSelectedBuilding.id,
+																	farm.id
+																);
+															}}
+														>
+															Assign
+														</button>
+													</li>
+												);
+											}
+										)}
+									</ul>
+								) : (
+									<p className="mt-1 text-[11px] text-stone-400">
+										Wild tree (not connected to any forest building).
+									</p>
+								)}
+							</div>
+						)}
 
 						{/* Area Coverage Breakdown for Service / Radius Buildings */}
 						{selectedCoverageStats && (

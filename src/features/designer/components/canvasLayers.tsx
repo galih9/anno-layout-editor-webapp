@@ -244,9 +244,9 @@ const drawSingleStructure = (
 
 	const canShowText =
 		showLabels &&
-		scale >= 0.55 &&
-		widthPx >= 2 * CELL_SIZE &&
-		heightPx >= 2 * CELL_SIZE;
+		scale >= 0.35 &&
+		((widthPx >= 2 * CELL_SIZE && heightPx >= 2 * CELL_SIZE) ||
+			Boolean(building.customLabel));
 
 	if (showIcons && scale >= 0.24) {
 		const iconImage = ensureImageLoaded(preset?.iconUrl);
@@ -791,7 +791,7 @@ export const BuildingsLayer = memo(function BuildingsLayer({
 					}
 
 					// Pass D: Building icons
-					const canRenderLabelsAtScale = showLabels && bounds.scale >= 0.55;
+					const canRenderLabelsAtScale = showLabels && bounds.scale >= 0.35;
 					if (showIcons && bounds.scale >= 0.24) {
 						rawContext.globalAlpha = 1;
 						for (const entry of visibleStructures) {
@@ -803,8 +803,9 @@ export const BuildingsLayer = memo(function BuildingsLayer({
 							const iconSize = clampNumber(minSidePx * 0.56, 18, 52);
 							const hasLabelOnThis =
 								canRenderLabelsAtScale &&
-								entry.widthPx >= 2 * CELL_SIZE &&
-								entry.heightPx >= 2 * CELL_SIZE;
+								((entry.widthPx >= 2 * CELL_SIZE &&
+									entry.heightPx >= 2 * CELL_SIZE) ||
+									Boolean(entry.building.customLabel));
 							const iconX = entry.xPx + (entry.widthPx - iconSize) * 0.5;
 							const iconY = hasLabelOnThis
 								? entry.yPx + Math.max(4, (entry.heightPx - iconSize) * 0.5 - 7)
@@ -823,8 +824,9 @@ export const BuildingsLayer = memo(function BuildingsLayer({
 
 						for (const entry of visibleStructures) {
 							if (
-								entry.widthPx < 2 * CELL_SIZE ||
-								entry.heightPx < 2 * CELL_SIZE
+								(entry.widthPx < 2 * CELL_SIZE ||
+									entry.heightPx < 2 * CELL_SIZE) &&
+								!entry.building.customLabel
 							) {
 								continue;
 							}
@@ -930,7 +932,7 @@ export const DynamicOverlayLayer = memo(function DynamicOverlayLayer({
 
 			rawContext.save();
 
-			// 1. Covered building emerald borders + top-right indicator dots
+			// 1. Covered / connected child building green borders + top-right indicator dots
 			if (coveredBuildingIds.size > 0) {
 				rawContext.beginPath();
 				let hasCoveredBorders = false;
@@ -963,19 +965,38 @@ export const DynamicOverlayLayer = memo(function DynamicOverlayLayer({
 						continue;
 					}
 
-					badgeCenters.push({ x: xPx + widthPx - 8, y: yPx + 8 });
+					if (baseBuilding.width >= 2 && baseBuilding.height >= 2) {
+						badgeCenters.push({ x: xPx + widthPx - 8, y: yPx + 8 });
+					}
 
 					if (hoveredBuildingId === coveredId || isMovingThis) {
 						continue;
 					}
 					const preset = PRESET_BY_ID.get(baseBuilding.presetId);
-					const radius = useRoundedCorners && !preset?.isBorderless ? 3 : 0;
-					traceRoundedRectPath(rawContext, xPx, yPx, widthPx, heightPx, radius);
+					const isSingleTile =
+						baseBuilding.width === 1 && baseBuilding.height === 1;
+					const radius = useRoundedCorners
+						? isSingleTile
+							? 2
+							: preset?.isBorderless
+								? 2
+								: 3
+						: 0;
+					traceRoundedRectPath(
+						rawContext,
+						xPx + 1,
+						yPx + 1,
+						widthPx - 2,
+						heightPx - 2,
+						radius
+					);
 					hasCoveredBorders = true;
 				}
 
 				if (hasCoveredBorders) {
-					rawContext.strokeStyle = "#10b981";
+					rawContext.fillStyle = "rgba(34, 197, 94, 0.14)";
+					rawContext.fill();
+					rawContext.strokeStyle = "#22c55e";
 					rawContext.lineWidth = 2.25;
 					rawContext.stroke();
 				}
@@ -986,7 +1007,7 @@ export const DynamicOverlayLayer = memo(function DynamicOverlayLayer({
 						rawContext.moveTo(center.x + 4.5, center.y);
 						rawContext.arc(center.x, center.y, 4.5, 0, FULL_CIRCLE_RADIANS);
 					}
-					rawContext.fillStyle = "#10b981";
+					rawContext.fillStyle = "#22c55e";
 					rawContext.fill();
 					rawContext.strokeStyle = "#052e16";
 					rawContext.lineWidth = 1;

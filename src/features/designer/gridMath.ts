@@ -5,6 +5,7 @@ import type {
 	BuildingPreset,
 	GridPoint,
 	GridRect,
+	ImportedBuildingItem,
 	PlacedBuilding,
 	TileSpan,
 } from "./types";
@@ -382,6 +383,7 @@ type SerializedPlaygroundLayout = {
 	readonly gridWidth?: number;
 	readonly gridHeight?: number;
 	readonly buildings?: ReadonlyArray<{
+		readonly id?: string;
 		readonly presetId: string;
 		readonly x: number;
 		readonly y: number;
@@ -390,6 +392,8 @@ type SerializedPlaygroundLayout = {
 		readonly rotated?: boolean;
 		readonly customColor?: string;
 		readonly customLabel?: string;
+		readonly parentId?: string;
+		readonly childIds?: ReadonlyArray<string>;
 	}>;
 	readonly FileVersion?: number;
 	readonly Objects?: ReadonlyArray<AnnoDesignerObject>;
@@ -409,6 +413,7 @@ export const serializePlaygroundJson = (options: {
 			gridWidth: options.gridWidth,
 			gridHeight: options.gridHeight,
 			buildings: options.buildings.map((building) => ({
+				id: building.id,
 				presetId: building.presetId,
 				x: building.x,
 				y: building.y,
@@ -417,6 +422,10 @@ export const serializePlaygroundJson = (options: {
 				rotated: building.rotated,
 				...(building.customColor ? { customColor: building.customColor } : {}),
 				...(building.customLabel ? { customLabel: building.customLabel } : {}),
+				...(building.parentId ? { parentId: building.parentId } : {}),
+				...(building.childIds && building.childIds.length > 0
+					? { childIds: building.childIds }
+					: {}),
 			})),
 		},
 		null,
@@ -488,12 +497,12 @@ export const parseLayoutJson = (
 	presetMap: ReadonlyMap<string, BuildingPreset> = PRESET_BY_ID
 ): {
 	readonly layoutName: string;
-	readonly buildings: Array<Omit<PlacedBuilding, "id">>;
+	readonly buildings: Array<ImportedBuildingItem>;
 } => {
 	const parsed = JSON.parse(jsonText) as SerializedPlaygroundLayout;
 
 	if (Array.isArray(parsed.buildings)) {
-		const validBuildings: Array<Omit<PlacedBuilding, "id">> = [];
+		const validBuildings: Array<ImportedBuildingItem> = [];
 		for (const entry of parsed.buildings) {
 			if (
 				typeof entry.presetId === "string" &&
@@ -504,7 +513,15 @@ export const parseLayoutJson = (
 				entry.width > 0 &&
 				entry.height > 0
 			) {
+				const parsedChildIds = Array.isArray(entry.childIds)
+					? entry.childIds.filter(
+							(childId): childId is string => typeof childId === "string"
+						)
+					: undefined;
 				validBuildings.push({
+					...(typeof entry.id === "string" && entry.id.length > 0
+						? { id: entry.id }
+						: {}),
 					presetId: presetMap.has(entry.presetId)
 						? entry.presetId
 						: "BlockTile_1x1",
@@ -515,6 +532,12 @@ export const parseLayoutJson = (
 					rotated: Boolean(entry.rotated),
 					...(entry.customColor ? { customColor: entry.customColor } : {}),
 					...(entry.customLabel ? { customLabel: entry.customLabel } : {}),
+					...(typeof entry.parentId === "string" && entry.parentId.length > 0
+						? { parentId: entry.parentId }
+						: {}),
+					...(parsedChildIds && parsedChildIds.length > 0
+						? { childIds: parsedChildIds }
+						: {}),
 				});
 			}
 		}
@@ -526,7 +549,7 @@ export const parseLayoutJson = (
 	}
 
 	if (Array.isArray(parsed.Objects)) {
-		const rawConverted: Array<Omit<PlacedBuilding, "id">> = [];
+		const rawConverted: Array<ImportedBuildingItem> = [];
 		let minimumX = 0;
 		let minimumY = 0;
 

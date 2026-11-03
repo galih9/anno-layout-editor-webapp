@@ -48,6 +48,12 @@ export type PlacedBuilding = {
 	readonly rotated: boolean;
 	readonly customColor?: string;
 	readonly customLabel?: string;
+	readonly parentId?: string;
+	readonly childIds?: ReadonlyArray<string>;
+};
+
+export type ImportedBuildingItem = Omit<PlacedBuilding, "id"> & {
+	readonly id?: string;
 };
 
 export type GridPoint = {

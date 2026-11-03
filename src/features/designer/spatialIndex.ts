@@ -95,7 +95,12 @@ export const buildSpatialGridIndex = (
 		if (preset?.category === "residence") {
 			residences.push(building);
 		}
-		if (preset && !isRoad && preset.template !== "Blocker") {
+		if (
+			preset &&
+			!isRoad &&
+			preset.template !== "Blocker" &&
+			building.presetId !== "TreeTile_1x1"
+		) {
 			coverableBuildings.push(building);
 		}
 		if (preset && preset.influenceRadius > 0) {
